@@ -137,6 +137,7 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
     const addSocks = opts.addSocks !== false;
     const webUI = opts.webUI === true;
     const tunOpt = opts.tun;
+    const tunStack = tunOpt?.stack === 'mips' ? 'mips' : 'gvisor';
     const perProxyGroupName = (name) => `🔒 ${name}`;
     let template = MIHOMO_DEFAULT_TEMPLATE;
     if (!addSocks) {
@@ -172,7 +173,7 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
                     name: `mihomo-tun-${idx + 1}`,
                     type: 'tun',
                     device: `mitun${idx}`,
-                    stack: 'gvisor',
+                    stack: tunStack,
                     'auto-route': false,
                     'auto-detect-interface': false,
                     'inet4-address': [inet4],
@@ -228,7 +229,7 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
         } else {
             const tun = {
                 enable: true,
-                stack: 'gvisor',
+                stack: tunStack,
                 'auto-route': false,
                 'auto-detect-interface': true,
                 device: 'mitun0',
