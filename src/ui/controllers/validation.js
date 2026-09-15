@@ -24,6 +24,7 @@ import {
     setGenerateEnabled,
 } from '../components/output-panel.js';
 import {
+    getMihomoTunStack,
     setMihomoPerProxyPortVisible,
     setMihomoPerProxyTunVisible,
     setSingboxPerProxyTunVisible,
@@ -48,6 +49,7 @@ function getFormOptions(core) {
     const mihomoTunEnabled = core === 'mihomo' ? !!el.cbMihomoTun?.checked : false;
     const mihomoPerProxyTun = core === 'mihomo' ? !!el.cbMihomoPerProxyTun?.checked : false;
     const mihomoSocksEnabled = core === 'mihomo' ? !!el.cbMihomoSocks?.checked : false;
+    const mihomoTunStack = core === 'mihomo' ? getMihomoTunStack() : 'gvisor';
 
     return {
         tunName: el.tunName?.value.trim() || '',
@@ -59,8 +61,11 @@ function getFormOptions(core) {
         webUI: core === 'mihomo' ? !!el.cbMihomoWebUI?.checked : false,
         mihomoTunEnabled,
         mihomoPerProxyTun,
+        mihomoTunStack,
         mihomoSocksEnabled,
-        mihomoTunOpts: mihomoTunEnabled ? { mode: (mihomoPerProxyTun ? 'listeners' : 'tun') } : null,
+        mihomoTunOpts: mihomoTunEnabled
+            ? { mode: (mihomoPerProxyTun ? 'listeners' : 'tun'), stack: mihomoTunStack }
+            : null,
         urlTest: getUrlTest(),
     };
 }
@@ -221,6 +226,7 @@ export function validateField(showOutput) {
                 enableBalancer: !!el.cbXrayBalancer?.checked,
                 webUI: options.webUI,
                 mihomoPerProxyTun: options.mihomoPerProxyTun,
+                mihomoTunStack: options.mihomoTunStack,
                 perProxyPort: !!el.cbMihomoPerProxyPort?.checked,
                 mihomoSubscriptionMode: isMihomoSubscriptionMode(),
                 excludeFilter: options.excludeFilter,

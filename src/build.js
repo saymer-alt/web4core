@@ -153,7 +153,10 @@ export function buildFromRequest(req) {
     throw new Error('Mihomo: enable at least one inbound (TUN or SOCKS5)');
   }
   const perProxyListeners = perProxyPort || !!options.mihomoPerProxyTun;
-  const mihomoTunOpts = addTun ? { mode: (options.mihomoPerProxyTun ? 'listeners' : 'tun') } : null;
+  const mihomoTunOpts = addTun ? {
+    mode: (options.mihomoPerProxyTun ? 'listeners' : 'tun'),
+    stack: options.mihomoTunStack,
+  } : null;
 
   const subMode = !!options.mihomoSubscriptionMode;
   if (subMode) {
@@ -167,7 +170,7 @@ export function buildFromRequest(req) {
     extraBeans.forEach(validateBean);
     assertCoreSupports(extraBeans, core, 'Mihomo', options);
 
-    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter});
+    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, { addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter });
     const yaml = buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, cfg.listeners, {
       addSocks,
       webUI,
@@ -177,7 +180,7 @@ export function buildFromRequest(req) {
   }
 
   const outBeans = allBeans.filter((b) => b.proto !== 'sdns');
-  const cfg = buildMihomoConfig(outBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest});
+  const cfg = buildMihomoConfig(outBeans, { addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest });
   const yaml = buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, {
     addSocks,
     webUI,

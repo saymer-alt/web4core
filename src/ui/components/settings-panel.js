@@ -1,6 +1,20 @@
 import { el } from '../dom.js';
 import { state } from '../state.js';
 import { toggleHidden } from '../utils/dom-utils.js';
+import { createChoicePicker } from './choice-picker.js';
+
+const DEFAULT_MIHOMO_TUN_STACK = 'gvisor';
+const MIHOMO_TUN_STACKS = [
+    { value: DEFAULT_MIHOMO_TUN_STACK, label: 'gVisor' },
+    { value: 'system', label: 'System' },
+    { value: 'mixed', label: 'Mixed' },
+    { value: 'mips', label: 'MIPS' },
+];
+let mihomoTunStackPicker;
+
+export function getMihomoTunStack() {
+    return mihomoTunStackPicker?.getValue() || DEFAULT_MIHOMO_TUN_STACK;
+}
 
 export function setMihomoPerProxyTunVisible(visible) {
     const show = !!visible;
@@ -30,8 +44,14 @@ function syncExcludeFilterVisibility(core = state.core) {
     toggleHidden(el.mihomoExcludeFilterField, core !== 'mihomo' || !el.cbMihomoSub?.checked);
 }
 
+function syncMihomoTunStackVisibility(core = state.core) {
+    toggleHidden(el.mihomoTunStackField, core !== 'mihomo' || !el.cbMihomoTun?.checked);
+}
+
 export function setSettingsVisibilityForCore(core) {
+    if (core !== 'mihomo') mihomoTunStackPicker?.setOpen(false);
     syncExcludeFilterVisibility(core);
+    syncMihomoTunStackVisibility(core);
     const hideSing = core !== 'singbox';
     toggleHidden(el.cbTun?.parentElement, hideSing);
     toggleHidden(el.cbSocks?.parentElement, hideSing);
@@ -57,6 +77,17 @@ export function setSettingsVisibilityForCore(core) {
 }
 
 export function initSettingsPanel({ validateField, updatePlaceholder, closeUrlTestMenu }) {
+    mihomoTunStackPicker = createChoicePicker({
+        button: el.mihomoTunStackButton,
+        buttonLabel: el.mihomoTunStackText,
+        menu: el.mihomoTunStackMenu,
+        choices: MIHOMO_TUN_STACKS,
+        initialValue: DEFAULT_MIHOMO_TUN_STACK,
+        compact: true,
+        itemTitle: choice => choice.title || '',
+        buttonTitle: choice => choice.title || `${choice.buttonLabel || choice.label} TUN stack`,
+        onChange: () => validateField(false),
+    });
     el.cbMihomoSub?.addEventListener('change', () => syncExcludeFilterVisibility());
     el.mihomoExcludeFilter?.addEventListener('input', () => {
         el.outBlock?.classList.add('hidden');
@@ -64,7 +95,8 @@ export function initSettingsPanel({ validateField, updatePlaceholder, closeUrlTe
     });
     if (el.btnChevron && el.settingsPanel) {
         el.btnChevron.addEventListener('click', () => {
-            if (state.urlTestMenuOpen) closeUrlTestMenu?.();
+            closeUrlTestMenu?.();
+            mihomoTunStackPicker?.setOpen(false);
             const collapsed = el.settingsPanel.classList.toggle('settings-panel--collapsed');
             el.btnChevron.setAttribute('aria-expanded', String(!collapsed));
             el.settingsPanel.inert = collapsed;
@@ -104,6 +136,8 @@ export function initSettingsPanel({ validateField, updatePlaceholder, closeUrlTe
         });
         el.cbMihomoTun.addEventListener('change', () => {
             if (!el.cbMihomoTun.checked) el.cbMihomoPerProxyTun.checked = false;
+            if (!el.cbMihomoTun.checked) mihomoTunStackPicker?.setOpen(false);
+            syncMihomoTunStackVisibility();
             validateField(false);
         });
     }
