@@ -866,7 +866,48 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
     return { providers, groups, rules, proxies: extraProxies, listeners };
 }
 
+// Two independent priority tiers. Reuse proxy/provider builders; no domain-specific policy.
+function buildMihomoPriorityConfig(primary, fallback, opts) {
+    const proxies = [];
+    const providers = {};
+    const targets = [];
+    const providerTargets = [];
+    const probe = { url: getUrlTest(opts), interval: PROXY_FETCH_INTERVAL, 'expected-status': getUrlTestExpectedStatus(opts), lazy: false };
+    for (const [name, side] of [['PRIMARY', primary], ['FALLBACK', fallback]]) {
+        const built = side.subUrls.length
+            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter })
+            : buildMihomoConfig(side.beans, { urlTest: opts?.urlTest });
+        const names = [];
+        built.proxies.forEach((proxy, index) => {
+            // Index prevents duplicate user names, including reserved group/builtin names.
+            proxy.name = name + '-' + (index + 1) + ': ' + proxy.name;
+            names.push(proxy.name);
+            proxies.push(proxy);
+        });
+        const use = [];
+        Object.entries(built.providers || {}).forEach(([key, provider]) => {
+            const providerName = name.toLowerCase() + '-' + key;
+            provider['health-check'].lazy = false;
+            provider.override = { 'additional-prefix': providerName + ': ' };
+            providers[providerName] = provider;
+            use.push(providerName);
+        });
+        targets.push(...names);
+        providerTargets.push(...use);
+    }
+    // Mihomo GetProxies reorders ALL providers (including static proxies) by these
+    // backtick-separated filters. Without this, fallback statics precede primary use.
+    // Never nest groups here: their cached health state can mask live children (#2588).
+    const groups = [{ name: GLOBAL_GROUP_NAME, type: 'fallback',
+        ...(targets.length ? { proxies: targets } : {}),
+        ...(providerTargets.length ? { use: providerTargets } : {}),
+        filter: '^(PRIMARY-|primary-)`^(FALLBACK-|fallback-)',
+        ...probe, 'empty-fallback': 'REJECT' }];
+    return { proxies, providers, groups, rules: [`MATCH,${GLOBAL_GROUP_NAME}`] };
+}
+
 export {
+    buildMihomoPriorityConfig,
     buildMihomoProxy,
     buildMihomoConfig,
     buildMihomoSubscriptionConfig,

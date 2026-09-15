@@ -113,3 +113,10 @@ Consumer workflow проверяет custom branch; локальные пров�
 конфиги, subscription URLs с credentials, ключи и токены не помещать в fixtures,
 логи, коммиты, issues или сторонние сервисы. Не добавлять телеметрию и сетевые вызовы
 в пользовательские потоки без отдельного согласования.
+
+## Primary/fallback extension
+
+Optional `fallbackInput` is a generic Mihomo contract; see
+[tools/tests/PRIMARY-FALLBACK.md](tools/tests/PRIMARY-FALLBACK.md).
+Run `node --test tools/tests/mihomo-priority.test.mjs` with existing source tests.
+Consumer-specific whitelist policy stays outside engine.

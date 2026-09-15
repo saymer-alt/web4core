@@ -11,7 +11,7 @@ import {
 
 import { buildSingBoxConfig, buildSingBoxOutbound } from './core/singbox.js';
 import { buildXrayConfig, buildXrayOutbound } from './core/xray.js';
-import { buildMihomoConfig, buildMihomoProxy, buildMihomoSubscriptionConfig } from './core/mihomo.js';
+import { buildMihomoPriorityConfig, buildMihomoConfig, buildMihomoProxy, buildMihomoSubscriptionConfig } from './core/mihomo.js';
 import { buildMihomoYaml } from './core/yaml.js';
 import { fetchSubscription } from './core/subscription.js';
 import { parseWireGuardConf } from './core/wireguard.js';
@@ -30,6 +30,7 @@ globalThis.web4core = Object.assign({}, globalThis.web4core || {}, {
   buildXrayConfig,
   buildMihomoProxy,
   buildMihomoConfig,
+  buildMihomoPriorityConfig,
   buildMihomoSubscriptionConfig,
   buildMihomoYaml,
   parseWireGuardConf,

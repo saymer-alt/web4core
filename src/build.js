@@ -1,7 +1,7 @@
 import { buildBeansFromInput, computeTag, getAllowedCoreProtocols, resolveUrlTest, validateBean } from './main.js';
 import { buildSingBoxConfig, buildSingBoxOutbound, buildSingBoxWireGuardEndpoint } from './core/singbox.js';
 import { buildXrayConfig, buildXrayOutbound } from './core/xray.js';
-import { buildMihomoConfig, buildMihomoSubscriptionConfig } from './core/mihomo.js';
+import { buildMihomoConfig, buildMihomoSubscriptionConfig, buildMihomoPriorityConfig } from './core/mihomo.js';
 import { buildMihomoYaml } from './core/yaml.js';
 
 function assertCoreSupports(beans, core, label, options) {
@@ -66,6 +66,26 @@ export function buildFromRequest(req) {
     if (options.webUI === undefined) options.webUI = true;
     if (options.addTun === undefined) options.addTun = false;
     if (options.addSocks === undefined) options.addSocks = true;
+  }
+
+  // Optional generic primary/fallback request; legacy requests keep their exact path.
+  if (core === 'mihomo' && req.fallbackInput !== undefined) {
+    if (!options.addTun && !options.addSocks) throw new Error('Mihomo: enable at least one inbound (TUN or SOCKS5)');
+    if (options.mihomoPerProxyTun || options.perProxyPort) throw new Error('Mihomo primary/fallback groups do not support per-proxy listeners');
+    const parseSide = (text, profiles, label) => {
+      const { subUrls, proxyText } = splitMihomoSubscriptionInput(text);
+      if (subUrls.length && !options.mihomoSubscriptionMode) throw new Error('Enable Sub Mode for subscription URLs (' + label + ')');
+      const beans = [...(proxyText.trim() ? buildBeansFromInput(proxyText) : []), ...profiles];
+      beans.forEach(validateBean);
+      assertCoreSupports(beans, core, 'Mihomo', options);
+      if (!beans.length && !subUrls.length) throw new Error('Mihomo: ' + label + ' input is empty');
+      return { beans, subUrls };
+    };
+    const cfg = buildMihomoPriorityConfig(parseSide(input, wgBeans, 'primary'), parseSide(req.fallbackInput, [], 'fallback'), options);
+    return { kind: 'yaml', data: buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, [], {
+      addSocks: !!options.addSocks, webUI: !!options.webUI,
+      tun: options.addTun ? { mode: 'tun', stack: options.mihomoTunStack } : null,
+    }) };
   }
 
   const beans = input.trim() ? buildBeansFromInput(input.trim()) : [];
