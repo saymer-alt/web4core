@@ -201,6 +201,17 @@ function asInt(n, def = 0) {
     return Number.isFinite(x) ? x : def;
 }
 
+// mport/hop-port list: "443", "20000-30000", "2000-3000,4000" — each number 1..65535.
+function isValidMportList(v) {
+    return String(v).split(',').every(tok => {
+        const m = tok.trim().match(/^(\d{1,5})(?:-(\d{1,5}))?$/);
+        if (!m) return false;
+        const a = Number(m[1]);
+        const b = m[2] !== undefined ? Number(m[2]) : a;
+        return a >= 1 && a <= 65535 && b >= 1 && b <= 65535 && a <= b;
+    });
+}
+
 // Outbound port: absent -> protocol default; present garbage/out-of-range -> explicit error (never a silent default).
 function parsePortValue(raw, def, proto) {
     if (raw === undefined || raw === null || raw === '') return def;
@@ -967,6 +978,9 @@ function parseHysteria2(urlStr) {
     const brutalUp = (q.get('brutal_up') || q.get('brutalUp') || q.get('up') || '').trim();
     const brutalDown = (q.get('brutal_down') || q.get('brutalDown') || q.get('down') || '').trim();
     const hopPort = (q.get('mport') || '').trim();
+    if (hopPort && !isValidMportList(hopPort)) {
+        throw new Error('hysteria2: invalid mport "' + hopPort + '" (expected port or port-range list)');
+    }
     const hopIntervalRaw = (q.get('hop_interval') || '').trim();
     let hopIntervalValue = null;
     if (hopIntervalRaw) {
@@ -1336,7 +1350,8 @@ function buildBeansFromInput(raw) {
         }
     }
     const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    return lines.map(parseLink);
+    // Comment lines (extended input convenience) are skipped, not parsed as links.
+    return lines.filter(l => !l.startsWith('#')).map(parseLink);
 }
 
 function buildStreamFromQuery(q, isTrojan) {

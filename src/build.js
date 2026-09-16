@@ -29,6 +29,7 @@ function splitMihomoSubscriptionInput(raw) {
   const subUrls = [];
   const proxyLines = [];
   for (const line of lines) {
+    if (line.startsWith('#')) continue; // comment lines are skipped
     if (/^https?:\/\//i.test(line)) {
       try {
         const u = new URL(line);
