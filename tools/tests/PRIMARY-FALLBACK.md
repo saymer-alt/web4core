@@ -18,7 +18,12 @@ there is no latency minimization. Nested groups are forbidden because #2588 is
 reproducible on v1.19.31. Prefixes and this ordered filter are one contract.
 
 GLOBAL and every provider have active health checks (300s, same URL/status,
-lazy=false). GLOBAL uses `empty-fallback: REJECT`. Provider downloads retain their
+lazy=false). GLOBAL uses `empty-fallback: REJECT`. The group also carries
+`timeout: 60000` and `max-failed-times: 2`: mihomo 1.19.31 forces a health
+check only after that many dial failures inside the window (the 5-within-5000ms
+default lets sparse user dials reset the counter, keeping a blackhole primary
+selected until the next scheduled check). Verified with a deterministic local
+MRE on v1.19.31. Provider downloads retain their
 existing DIRECT route; DIRECT is never a traffic target. Names are scoped per tier;
 provider override prefixes also scope dynamically loaded proxy names.
 

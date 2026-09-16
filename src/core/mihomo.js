@@ -3,6 +3,14 @@ import { computeTag, validateBean, PROXY_FETCH_INTERVAL, SUB_REFRESH_INTERVAL, r
 const FASTEST_GROUP_NAME = '⚡ Fastest';
 const GLOBAL_GROUP_NAME = 'GLOBAL';
 const PER_PROXY_GROUP_PREFIX = '🔒 ';
+// Dial-failure detection for the unattended primary/fallback GLOBAL: mihomo
+// only triggers the forced health check after max-failed-times dial failures
+// within `timeout` ms ("connection refused" triggers immediately). With the
+// 5000ms default the counter resets between sparse user dials, so a blackhole
+// primary stays "alive" until the next scheduled provider check. 2 failures
+// within 60s were verified to switch over on mihomo v1.19.31.
+const FALLBACK_DIAL_FAILURE_WINDOW_MS = 60000;
+const FALLBACK_MAX_DIAL_FAILURES = 2;
 
 function getPerProxyGroupName(proxyName) {
     return `${PER_PROXY_GROUP_PREFIX}${proxyName}`;
@@ -906,7 +914,9 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
         ...(targets.length ? { proxies: targets } : {}),
         ...(providerTargets.length ? { use: providerTargets } : {}),
         filter: '^(PRIMARY-|primary-)`^(FALLBACK-|fallback-)',
-        ...probe, 'empty-fallback': 'REJECT' }];
+        ...probe, 'empty-fallback': 'REJECT',
+        timeout: FALLBACK_DIAL_FAILURE_WINDOW_MS,
+        'max-failed-times': FALLBACK_MAX_DIAL_FAILURES }];
     return { proxies, providers, groups, rules: [`MATCH,${GLOBAL_GROUP_NAME}`] };
 }
 

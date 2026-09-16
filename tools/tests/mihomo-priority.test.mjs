@@ -32,6 +32,9 @@ test('independent names, membership, providers, no direct targets', () => {
     assert.deepEqual(cfg.groups[0].proxies, cfg.proxies.map(p => p.name));
     assert.deepEqual(cfg.groups[0].use, Object.keys(cfg.providers));
     assert.equal(cfg.groups[0].filter, '^(PRIMARY-|primary-)`^(FALLBACK-|fallback-)');
+    // Dial-failure health detection (Max case): widened window + low threshold.
+    assert.equal(cfg.groups[0].timeout, 60000);
+    assert.equal(cfg.groups[0]['max-failed-times'], 2);
     assert.ok(cfg.groups.every(g => !g.proxies?.includes('DIRECT') && g['empty-fallback'] === 'REJECT' && g.lazy === false));
     assert.ok(Object.values(cfg.providers).every(p => p.override['additional-prefix'] && p['health-check'].lazy === false));
     for (const p of Object.values(cfg.providers)) {
@@ -51,4 +54,8 @@ test('reject incomplete/unsupported requests and per-proxy combinations', () => 
         assert.throws(() => buildFromRequest({ ...req, ...extra }));
     }
     assert.doesNotMatch(buildFromRequest(req).data, /stack:|listeners:/);
+});
+test('priority-only fields stay out of the generic output (byte parity)', () => {
+    const normal = buildFromRequest({ core: 'mihomo', input: a, options: { addTun: false } }).data;
+    assert.doesNotMatch(normal, /max-failed-times|timeout:/);
 });
