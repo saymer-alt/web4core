@@ -44,6 +44,31 @@ function splitMihomoSubscriptionInput(raw) {
   return { subUrls, proxyText: proxyLines.join('\n') };
 }
 
+const WEB_UI_DASHBOARD_URLS = {
+  yacd: 'https://github.com/MetaCubeX/Yacd-meta/archive/refs/heads/gh-pages.zip',
+  zashboard: 'https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip',
+};
+
+function resolveWebUiUrl(options) {
+  const dashboard = String(options.webUiDashboard || '').trim().toLowerCase();
+  if (!dashboard || dashboard === 'metacubexd') return undefined; // legacy byte-parity
+  if (WEB_UI_DASHBOARD_URLS[dashboard]) return WEB_UI_DASHBOARD_URLS[dashboard];
+  if (dashboard === 'custom') {
+    const raw = String(options.webUiCustomUrl || '').trim();
+    let parsed;
+    try {
+      parsed = new URL(raw);
+    } catch {
+      throw new Error('Invalid Web UI URL (expected absolute http/https URL)');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('Invalid Web UI URL (expected http/https)');
+    }
+    return parsed.href;
+  }
+  throw new Error('Unknown Web UI dashboard: ' + dashboard);
+}
+
 export function buildFromRequest(req) {
   const core = String(req?.core || '').toLowerCase();
   const input = String(req?.input || '');
@@ -51,6 +76,10 @@ export function buildFromRequest(req) {
   const options = Object.assign({}, optionsIn);
   const wgBeans = Array.isArray(req?.wgBeans) ? req.wgBeans : [];
   options.urlTest = resolveUrlTest(options.urlTest);
+
+  // Selectable external dashboard: metacubexd (default, byte-parity with
+  // legacy output), yacd-meta, zashboard, or a validated custom archive URL.
+  options.webUiUrl = resolveWebUiUrl(options);
 
   if (!core) throw new Error('Missing core');
   if (core !== 'singbox' && core !== 'xray' && core !== 'mihomo') throw new Error('Invalid core: ' + core);
@@ -84,6 +113,7 @@ export function buildFromRequest(req) {
     const cfg = buildMihomoPriorityConfig(parseSide(input, wgBeans, 'primary'), parseSide(req.fallbackInput, [], 'fallback'), options);
     return { kind: 'yaml', data: buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, [], {
       addSocks: !!options.addSocks, webUI: !!options.webUI,
+      webUiUrl: options.webUiUrl,
       tun: options.addTun ? { mode: 'tun', stack: options.mihomoTunStack } : null,
     }) };
   }
@@ -191,6 +221,7 @@ export function buildFromRequest(req) {
     const yaml = buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, cfg.listeners, {
       addSocks,
       webUI,
+      webUiUrl: options.webUiUrl,
       tun: mihomoTunOpts,
     });
     return { kind: 'yaml', data: yaml };
@@ -201,6 +232,7 @@ export function buildFromRequest(req) {
   const yaml = buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, {
     addSocks,
     webUI,
+    webUiUrl: options.webUiUrl,
     tun: mihomoTunOpts,
   });
   return { kind: 'yaml', data: yaml };

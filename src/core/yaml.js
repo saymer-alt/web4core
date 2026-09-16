@@ -160,10 +160,12 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
         const lines = template.split('\n');
         const ipv6Index = lines.findIndex(l => /^ipv6\s*:/i.test(l));
         if (ipv6Index !== -1) {
+            // Custom dashboard URL (validated upstream in build.js); default stays metacubexd.
+            const externalUiUrl = String(opts.webUiUrl || 'https://github.com/MetaCubeX/metacubexd/releases/latest/download/compressed-dist.tgz');
             lines.splice(ipv6Index + 1, 0,
                 'external-controller: 0.0.0.0:9090',
                 'external-ui: ui',
-                'external-ui-url: https://github.com/MetaCubeX/metacubexd/releases/latest/download/compressed-dist.tgz',
+                'external-ui-url: ' + externalUiUrl,
                 'secret: '
             );
             template = lines.join('\n');
