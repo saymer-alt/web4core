@@ -132,12 +132,22 @@ const MIHOMO_DEFAULT_TEMPLATE = [
     '  - "MATCH,GLOBAL"'
 ].join('\n');
 
+const MIHOMO_TUN_STACKS = new Set(['gvisor', 'system', 'mixed', 'mips']);
+
+function resolveMihomoTunStack(tunOpt) {
+    const raw = tunOpt && typeof tunOpt === 'object' ? tunOpt.stack : '';
+    const stack = String(raw || 'gvisor').trim().toLowerCase();
+    if (!MIHOMO_TUN_STACKS.has(stack)) {
+        throw new Error(`Mihomo: invalid TUN stack "${stack}"`);
+    }
+    return stack;
+}
+
 function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
     opts = opts || {};
     const addSocks = opts.addSocks !== false;
     const webUI = opts.webUI === true;
     const tunOpt = opts.tun;
-    const tunStack = tunOpt?.stack === 'mips' ? 'mips' : 'gvisor';
     const perProxyGroupName = (name) => `🔒 ${name}`;
     let template = MIHOMO_DEFAULT_TEMPLATE;
     if (!addSocks) {
@@ -163,6 +173,7 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
         const lines = template.split('\n');
         const proxiesIndex = lines.findIndex(l => /^proxy-groups\s*:/i.test(l));
         const mode = (tunOpt && typeof tunOpt === 'object' && tunOpt.mode) ? String(tunOpt.mode) : 'tun';
+        const stack = resolveMihomoTunStack(tunOpt);
         if (mode === 'listeners') {
             const buildTunListener = (idx, proxyName) => {
                 const offset = idx * 4 + 1;
@@ -173,7 +184,7 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
                     name: `mihomo-tun-${idx + 1}`,
                     type: 'tun',
                     device: `mitun${idx}`,
-                    stack: tunStack,
+                    stack,
                     'auto-route': false,
                     'auto-detect-interface': false,
                     'inet4-address': [inet4],
@@ -229,7 +240,7 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
         } else {
             const tun = {
                 enable: true,
-                stack: tunStack,
+                stack,
                 'auto-route': false,
                 'auto-detect-interface': true,
                 device: 'mitun0',

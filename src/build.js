@@ -173,7 +173,7 @@ export function buildFromRequest(req) {
     throw new Error('Mihomo: enable at least one inbound (TUN or SOCKS5)');
   }
   const perProxyListeners = perProxyPort || !!options.mihomoPerProxyTun;
-  const mihomoTunOpts = addTun ? { mode: (options.mihomoPerProxyTun ? 'listeners' : 'tun'), stack: options.mihomoTunStack === 'mips' ? 'mips' : 'gvisor' } : null;
+  const mihomoTunOpts = addTun ? { mode: (options.mihomoPerProxyTun ? 'listeners' : 'tun'), stack: options.mihomoTunStack } : null;
 
   const subMode = !!options.mihomoSubscriptionMode;
   if (subMode) {
