@@ -201,6 +201,16 @@ function asInt(n, def = 0) {
     return Number.isFinite(x) ? x : def;
 }
 
+// Outbound port: absent -> protocol default; present garbage/out-of-range -> explicit error (never a silent default).
+function parsePortValue(raw, def, proto) {
+    if (raw === undefined || raw === null || raw === '') return def;
+    const s = String(raw).trim();
+    if (!/^\d{1,5}$/.test(s)) throw new Error(proto + ': invalid port "' + raw + '"');
+    const x = parseInt(s, 10);
+    if (x < 1 || x > 65535) throw new Error(proto + ': invalid port ' + x + ' (expected 1..65535)');
+    return x;
+}
+
 function sanitizeTag(s) {
     const cleaned = (s || '').replace(/[\u0000-\u001f]/g, '').trim();
     return cleaned || 'proxy';
@@ -457,6 +467,17 @@ function validateBean(bean) {
             throw new Error('REALITY shortId is too long (max 16 hex characters)');
         }
     }
+    // Final invariant: an outbound port, when present, must be a valid TCP/UDP port
+    // (mieru is exempt while its server_ports range is valid).
+    if (bean.port !== undefined && bean.port !== null && bean.port !== '') {
+        if (!(p === 'mieru' && hasValidPortRange(bean.mieru?.server_ports))) {
+            const n = Number(bean.port);
+            if (!Number.isFinite(n)) throw new Error(p + ': invalid port "' + bean.port + '"');
+            if (!Number.isInteger(n) || n < 1 || n > 65535) {
+                throw new Error(p + ': invalid port ' + bean.port + ' (expected 1..65535)');
+            }
+        }
+    }
 }
 
 function normalizeStream(stream, serverAddress) {
@@ -553,7 +574,7 @@ function parseMasque(urlStr) {
     return {
         proto: 'masque',
         host: u.hostname,
-        port: asInt(u.port, 443),
+        port: parsePortValue(u.port, 443, 'masque'),
         name,
         masque: {
             privateKey: (q.get('private-key') || '').trim(),
@@ -592,7 +613,7 @@ function parseSocksHttp(urlStr) {
     const bean = {
         proto: (isHttp || isHttps) ? 'http' : 'socks',
         host: u.hostname,
-        port: asInt(u.port, isHttps ? 443 : isHttp ? 80 : 1080),
+        port: parsePortValue(u.port, isHttps ? 443 : isHttp ? 80 : 1080, isHttp ? 'http' : 'socks'),
         name: safeDecodeURIComponent(u.hash.replace('#', '')),
         socks: {
             type: isHttp || isHttps ? 'http' : (isSocks4 ? 'socks4' : 'socks5'),
@@ -629,7 +650,7 @@ function parseTrojan(urlStr) {
     const bean = {
         proto: 'trojan',
         host: u.hostname,
-        port: asInt(u.port, 443),
+        port: parsePortValue(u.port, 443, 'trojan'),
         name: safeDecodeURIComponent(u.hash.replace('#', '')),
         auth: { password: safeDecodeURIComponent(u.username || '') },
         stream: buildStreamFromQuery(q, true),
@@ -649,7 +670,7 @@ function parseAnyTLS(urlStr) {
     const bean = {
         proto: 'anytls',
         host: u.hostname,
-        port: asInt(u.port, 443),
+        port: parsePortValue(u.port, 443, 'anytls'),
         name: safeDecodeURIComponent(u.hash.replace('#', '')),
         auth: { password: pwd },
         stream: buildStreamFromQuery(q, false),
@@ -682,7 +703,7 @@ function parseVLESS(urlStr) {
     const rawAfterScheme = urlStr.slice('vless://'.length);
     const rawAuthority = rawAfterScheme.split(/[?#]/)[0];
     let host = u.hostname;
-    let port = asInt(u.port, 443);
+    let port = parsePortValue(u.port, 443, 'vless');
     const rawUser = safeDecodeURIComponent(u.username || '').trim();
     let uuid = rawUser;
     if (!isValidUuid(uuid) && rawUser) {
@@ -805,7 +826,7 @@ function parseVMess(urlStr) {
         const bean = {
             proto: 'vmess',
             host: obj.add || 'localhost',
-            port: asInt(obj.port, 443),
+            port: parsePortValue(obj.port, 443, 'vmess'),
             name: obj.ps || '',
             auth: { uuid: obj.id, security: obj.scy || 'auto' },
             stream,
@@ -821,7 +842,7 @@ function parseVMess(urlStr) {
     const bean = {
         proto: 'vmess',
         host: u.hostname,
-        port: asInt(u.port, 443),
+        port: parsePortValue(u.port, 443, 'vmess'),
         name: safeDecodeURIComponent(u.hash.replace('#', '')),
         auth: { uuid: safeDecodeURIComponent(u.username || ''), security: q.get('encryption') || 'auto' },
         stream: buildStreamFromQuery(q, false),
@@ -970,7 +991,7 @@ function parseHysteria2(urlStr) {
     return {
         proto: 'hy2',
         host: u.hostname,
-        port: asInt(u.port, 443),
+        port: parsePortValue(u.port, 443, 'hy2'),
         name: safeDecodeURIComponent(u.hash.replace('#', '')),
         auth: { password: pwd },
         hysteria2: {
@@ -1005,7 +1026,7 @@ function parseTUIC(urlStr) {
     return {
         proto: 'tuic',
         host: u.hostname,
-        port: asInt(u.port, 443),
+        port: parsePortValue(u.port, 443, 'tuic'),
         name: safeDecodeURIComponent(u.hash.replace('#', '')),
         auth: {
             uuid: safeDecodeURIComponent(u.username || ''),
@@ -1294,7 +1315,7 @@ function parseSDNS(urlStr) {
     return {
         proto: 'sdns',
         host: u.hostname,
-        port: asInt(u.port, 443),
+        port: parsePortValue(u.port, 443, 'sdns'),
         name: name || 'sdns-server',
         sdns: {
             stamp: stamp
