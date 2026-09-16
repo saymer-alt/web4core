@@ -3,6 +3,11 @@ import { computeTag, validateBean, PROXY_FETCH_INTERVAL, SUB_REFRESH_INTERVAL, r
 const FASTEST_GROUP_NAME = '⚡ Fastest';
 const GLOBAL_GROUP_NAME = 'GLOBAL';
 const PER_PROXY_GROUP_PREFIX = '🔒 ';
+// Per-proxy listeners remove the ⚡ Fastest url-test group, which was the only
+// actor health-checking static proxies (providers self-check). This hidden
+// checker restores alive/history for static leaves without appearing in GLOBAL
+// or the dashboard; listeners keep targeting the 🔒 wrapper groups.
+const STATIC_HEALTH_GROUP_NAME = '🌐 static-health';
 // Dial-failure detection for the unattended primary/fallback GLOBAL: mihomo
 // only triggers the forced health check after max-failed-times dial failures
 // within `timeout` ms ("connection refused" triggers immediately). With the
@@ -681,6 +686,17 @@ function buildMihomoConfig(beans, opts) {
         proxies.forEach(p => {
             attachPerProxySelectGroup(groups, p);
         });
+        if (proxies.length > 0) {
+            groups.push({
+                name: STATIC_HEALTH_GROUP_NAME,
+                type: 'url-test',
+                hidden: true,
+                proxies: proxies.map(p => p.name),
+                url: urlTest,
+                interval: PROXY_FETCH_INTERVAL,
+                'expected-status': urlTestExpectedStatus
+            });
+        }
         const groupNames = proxies.map(p => getPerProxyGroupName(p.name));
         groups.push({
             name: GLOBAL_GROUP_NAME,
@@ -833,6 +849,17 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
     }
 
     if (usePerProxyListeners) {
+        if (extraProxies.length > 0) {
+            groups.push({
+                name: STATIC_HEALTH_GROUP_NAME,
+                type: 'url-test',
+                hidden: true,
+                proxies: extraProxies.map(p => p.name),
+                url: urlTest,
+                interval: PROXY_FETCH_INTERVAL,
+                'expected-status': urlTestExpectedStatus
+            });
+        }
         const globalTargets = providerNames.map(providerName => `SUB-${providerName}`);
         extraProxies.forEach((p) => {
             const targetGroup = getPerProxyGroupName(p.name);
