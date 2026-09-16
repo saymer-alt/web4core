@@ -44,6 +44,63 @@ function splitMihomoSubscriptionInput(raw) {
   return { subUrls, proxyText: proxyLines.join('\n') };
 }
 
+function splitHostPortEntry(s) {
+  // "host", "host:port", "[ipv6]", "[ipv6]:port"; bare IPv6 (no brackets) is
+  // treated as host-only because ':' is ambiguous there.
+  const bracket = s.match(/^\[([^\]]+)\](?::(\d{1,5}))?$/);
+  if (bracket) return { host: bracket[1], port: bracket[2] };
+  const hp = s.match(/^([^:]+):(\d{1,5})$/);
+  if (hp) return { host: hp[1], port: hp[2] };
+  return { host: s, port: undefined };
+}
+
+function normalizeRealityModernHosts(raw) {
+  if (raw === undefined || raw === null || raw === '') return [];
+  const arr = Array.isArray(raw) ? raw : [raw];
+  const out = [];
+  const seen = new Set();
+  for (const item of arr) {
+    let entry;
+    if (typeof item === 'string') {
+      const trimmed = item.trim();
+      if (!trimmed) continue;
+      entry = splitHostPortEntry(trimmed);
+    } else if (item && typeof item === 'object') {
+      entry = { host: String(item.host || '').trim(), port: item.port };
+    } else {
+      throw new Error('Invalid modern REALITY host entry');
+    }
+    const host = String(entry.host || '').trim().toLowerCase();
+    if (!host) throw new Error('Invalid modern REALITY host entry: missing host');
+    let port;
+    if (entry.port !== undefined && entry.port !== null && entry.port !== '') {
+      port = Number(entry.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        throw new Error('Invalid modern REALITY host entry: port ' + entry.port);
+      }
+    }
+    const key = host + (port !== undefined ? ':' + port : '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(port === undefined ? { host } : { host, port });
+  }
+  return out;
+}
+
+function applyRealityModernHosts(beans, modernHosts) {
+  if (!modernHosts.length) return;
+  for (const bean of beans) {
+    const reality = bean.stream && bean.stream.reality;
+    if (!reality || !reality.pbk) continue; // REALITY nodes only
+    // Bean hosts may keep IPv6 brackets (the YAML emitter re-adds them).
+    const host = String(bean.host || '').trim().toLowerCase().replace(/^\[/, '').replace(/\]$/, '');
+    const matched = modernHosts.some((e) => e.host === host && (e.port === undefined || e.port === bean.port));
+    if (!matched) continue;
+    reality.supportX25519MLKEM768 = true;
+    if (!bean.stream.fp) bean.stream.fp = 'chrome'; // PQ key share rides only on chrome-family uTLS
+  }
+}
+
 export function buildFromRequest(req) {
   const core = String(req?.core || '').toLowerCase();
   const input = String(req?.input || '');
@@ -51,6 +108,12 @@ export function buildFromRequest(req) {
   const options = Object.assign({}, optionsIn);
   const wgBeans = Array.isArray(req?.wgBeans) ? req.wgBeans : [];
   options.urlTest = resolveUrlTest(options.urlTest);
+
+  // Selective modern REALITY: [{host, port?}] — only matched REALITY nodes
+  // get support-x25519mlkem768 (+ default chrome fingerprint); absent/empty
+  // keeps the legacy output byte-for-byte.
+  const modernHosts = normalizeRealityModernHosts(options.mihomoRealityModernHosts);
+  options.modernHosts = modernHosts;
 
   if (!core) throw new Error('Missing core');
   if (core !== 'singbox' && core !== 'xray' && core !== 'mihomo') throw new Error('Invalid core: ' + core);
@@ -81,7 +144,12 @@ export function buildFromRequest(req) {
       if (!beans.length && !subUrls.length) throw new Error('Mihomo: ' + label + ' input is empty');
       return { beans, subUrls };
     };
-    const cfg = buildMihomoPriorityConfig(parseSide(input, wgBeans, 'primary'), parseSide(req.fallbackInput, [], 'fallback'), options);
+    const modernHosts = options.modernHosts;
+    const primarySide = parseSide(input, wgBeans, 'primary');
+    const fallbackSide = parseSide(req.fallbackInput, [], 'fallback');
+    applyRealityModernHosts(primarySide.beans, modernHosts);
+    applyRealityModernHosts(fallbackSide.beans, modernHosts);
+    const cfg = buildMihomoPriorityConfig(primarySide, fallbackSide, options);
     return { kind: 'yaml', data: buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, [], {
       addSocks: !!options.addSocks, webUI: !!options.webUI,
       tun: options.addTun ? { mode: 'tun', stack: options.mihomoTunStack } : null,
@@ -174,6 +242,7 @@ export function buildFromRequest(req) {
   }
   const perProxyListeners = perProxyPort || !!options.mihomoPerProxyTun;
   const mihomoTunOpts = addTun ? { mode: (options.mihomoPerProxyTun ? 'listeners' : 'tun'), stack: options.mihomoTunStack } : null;
+  applyRealityModernHosts(allBeans, modernHosts);
 
   const subMode = !!options.mihomoSubscriptionMode;
   if (subMode) {
@@ -186,8 +255,9 @@ export function buildFromRequest(req) {
     if (wgBeans.length) extraBeans.push(...wgBeans);
     extraBeans.forEach(validateBean);
     assertCoreSupports(extraBeans, core, 'Mihomo', options);
+    applyRealityModernHosts(extraBeans, modernHosts);
 
-    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter});
+    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter, modernHosts});
     const yaml = buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, cfg.listeners, {
       addSocks,
       webUI,
