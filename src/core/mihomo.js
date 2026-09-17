@@ -945,7 +945,9 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
         Object.entries(built.providers || {}).forEach(([key, provider]) => {
             const providerName = name.toLowerCase() + '-' + key;
             provider['health-check'].lazy = false;
-            provider.override = { 'additional-prefix': providerName + ': ' };
+            // Merge, not replace: buildMihomoSubscriptionConfig may already have
+            // attached override-expr (selective modern REALITY) to this provider.
+            provider.override = Object.assign({}, provider.override, { 'additional-prefix': providerName + ': ' });
             providers[providerName] = provider;
             use.push(providerName);
         });

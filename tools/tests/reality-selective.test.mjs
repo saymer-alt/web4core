@@ -104,6 +104,29 @@ test('direct + provider together (Sub Mode mixed input)', () => {
   assert.ok(yaml.includes(String.raw`.\"reality-opts\".\"support-x25519mlkem768\") = true`), 'provider expr present');
 });
 
+test('AWL/priority path preserves provider override-expr (D1 regression)', () => {
+  const yaml = buildFromRequest({
+    core: 'mihomo',
+    input: SUBS,
+    fallbackInput: 'https://fallback.example/b',
+    options: { ...opts, mihomoSubscriptionMode: true, mihomoRealityModernHosts: [{ host: 'pan1.example' }] },
+  }).data;
+  const providers = Object.values((() => {
+    // Extract provider sections by name from the YAML text.
+    const map = {};
+    const re = /^  (?!-\s)([^\s:]+|"[^"]+"):\n((?:    .*\n?)*)/gm;
+    // Simpler: count occurrences.
+    return map;
+  })());
+  void providers;
+  const exprCount = (yaml.match(/override-expr/g) || []).length;
+  const prefixCount = (yaml.match(/additional-prefix/g) || []).length;
+  assert.ok(exprCount >= 2, 'both providers carry override-expr');
+  assert.ok(prefixCount >= 2, 'both providers keep additional-prefix');
+  assert.match(yaml, /additional-prefix.*primary-sub1/);
+  assert.match(yaml, /additional-prefix.*fallback/);
+});
+
 test('invalid entries fail loudly; duplicates deduplicate', () => {
   assert.throws(() => build(R1, [{ port: 443 }]), /missing host/);
   assert.throws(() => build(R1, [{ host: 'x.example', port: 70000 }]), /port 70000/);
