@@ -27,6 +27,7 @@ test('per-proxy mode adds a hidden url-test checker over static leaves only', ()
     assert.ok(checker, 'checker group exists');
     assert.equal(checker.block.find(l => l.startsWith('type:')), 'type: url-test');
     assert.ok(checker.block.includes('hidden: true'));
+    assert.ok(checker.block.includes('lazy: false'), 'checker must schedule checks (lazy disabled)');
     const members = checker.block.filter(l => l.startsWith('- ') && !l.startsWith('- force')).map(l => l.slice(2));
     assert.deepEqual(members, ['fi', 'se']);
     assert.ok(checker.block.some(l => l.startsWith('url: ')));
@@ -51,4 +52,24 @@ test('generic mode never emits the checker (byte parity with legacy output)', ()
     const yaml = build({ perProxyPort: false });
     assert.doesNotMatch(yaml, /static-health/);
     assert.match(yaml, /name: "⚡ Fastest"/);
+});
+
+test('per-proxy static-only path emits the checker with lazy disabled', () => {
+  const yaml = buildFromRequest({
+    core: 'mihomo',
+    input: statics,
+    options: { addTun: false, addSocks: true, webUI: false, perProxyPort: true },
+  }).data;
+  const groups = groupsOf(yaml);
+  const checker = groups.find(g => g.name === '🌐 static-health');
+  assert.ok(checker, 'checker exists in static-only path');
+  assert.equal(checker.block.find(l => l.startsWith('type:')), 'type: url-test');
+  assert.ok(checker.block.includes('hidden: true'));
+  assert.ok(checker.block.includes('lazy: false'), 'lazy disabled in static-only path');
+  const members = checker.block.filter(l => l.startsWith('- ') && !l.startsWith('- force')).map(l => l.slice(2));
+  assert.deepEqual(members, ['fi', 'se']);
+  // topology unchanged: GLOBAL keeps wrappers, checker stays out of it
+  const global = groups.find(g => g.name === 'GLOBAL');
+  assert.ok(global.block.join('\n').includes('🔒 fi'));
+  assert.ok(!global.block.join('\n').includes('static-health'));
 });
