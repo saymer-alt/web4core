@@ -796,6 +796,24 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         providerNames.push(providerName);
     });
 
+    // Selective modern REALITY: per-host(/port) override expressions applied by
+    // mihomo to every loaded provider node. has("reality-opts") keeps plain
+    // VLESS/TLS nodes untouched; a second expression sets chrome fingerprint
+    // only where the provider did not define one.
+    if (Array.isArray(opts?.modernHosts) && opts.modernHosts.length) {
+        const exprs = [];
+        for (const e of opts.modernHosts) {
+            let sel = `select(.server == ${JSON.stringify(e.host)})`;
+            if (e.port !== undefined) sel += ` | select(.port == ${e.port})`;
+            exprs.push(`(${sel} | select(has("reality-opts")) | ."reality-opts"."support-x25519mlkem768") = true`);
+            exprs.push(`(${sel} | select(has("reality-opts")) | select(.client-fingerprint == null) | .client-fingerprint) = "chrome"`);
+        }
+        for (const providerName of providerNames) {
+            const override = providers[providerName].override = Object.assign({}, providers[providerName].override);
+            override['override-expr'] = [...(override['override-expr'] || []), ...exprs];
+        }
+    }
+
     const usePerProxyListeners = isPerProxyListenerMode(opts);
     const usePerProxyPort = !!(opts && opts.perProxyPort);
     const groups = [];
@@ -914,7 +932,7 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
     const probe = { url: getUrlTest(opts), interval: PROXY_FETCH_INTERVAL, 'expected-status': getUrlTestExpectedStatus(opts), lazy: false };
     for (const [name, side] of [['PRIMARY', primary], ['FALLBACK', fallback]]) {
         const built = side.subUrls.length
-            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter })
+            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts })
             : buildMihomoConfig(side.beans, { urlTest: opts?.urlTest });
         const names = [];
         built.proxies.forEach((proxy, index) => {
@@ -927,7 +945,9 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
         Object.entries(built.providers || {}).forEach(([key, provider]) => {
             const providerName = name.toLowerCase() + '-' + key;
             provider['health-check'].lazy = false;
-            provider.override = { 'additional-prefix': providerName + ': ' };
+            // Merge, not replace: buildMihomoSubscriptionConfig may already have
+            // attached override-expr (selective modern REALITY) to this provider.
+            provider.override = Object.assign({}, provider.override, { 'additional-prefix': providerName + ': ' });
             providers[providerName] = provider;
             use.push(providerName);
         });
