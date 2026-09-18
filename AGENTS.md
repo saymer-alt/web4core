@@ -1,72 +1,61 @@
-# AGENTS.md — web4core fork для link-generators
+# AGENTS.md - web4core fork for link-generators
 
-## Репозитории и ветки
+## Repositories and branches
 
-- `spatiumstas/web4core` — upstream.
-- `saymer-alt/web4core:main` — база, максимально близкая к upstream/main; не вносить
-  сюда наши расширения. Обновление зеркала — fast-forward, без переписывания истории.
-- `saymer-alt/web4core:link-generators` — рабочая source-level ветка. Parser, builder
-  и protocol support для link-generators реализуются здесь.
-- Remotes: `origin` → `https://github.com/saymer-alt/web4core.git`,
-  `upstream` → `https://github.com/spatiumstas/web4core.git`.
-- `saymer-alt/link-generators` — отдельный UI/browser consumer готового runtime.
-  Его формы, UX и UI-specific post-processing находятся в том репозитории.
+- spatiumstas/web4core - upstream.
+- saymer-alt/web4core:main - base branch kept as close as possible to upstream/main; do not add our extensions here. Update this mirror by fast-forward only, without rewriting history.
+- saymer-alt/web4core:link-generators - working source-level branch. Parser, builder, and protocol support for link-generators are implemented here.
+- Remotes: origin -> https://github.com/saymer-alt/web4core.git, upstream -> https://github.com/spatiumstas/web4core.git.
+- saymer-alt/link-generators - separate UI/browser consumer of the built runtime. Its forms, UX, and UI-specific post-processing live in that repository.
 
-Общая карта и выбор слоя: [WEB4CORE-FORK.md](https://github.com/saymer-alt/link-generators/blob/main/docs/WEB4CORE-FORK.md).
-Правила этого файла относятся к custom branch; main остаётся зеркалом upstream.
+Overall architecture and layer selection: [WEB4CORE-FORK.md](https://github.com/saymer-alt/link-generators/blob/main/docs/WEB4CORE-FORK.md).
+The rules in this file apply to the custom branch; main remains an upstream mirror.
 
-## Исходники и generated-файлы
+This AGENTS.md is intentionally in English for agent efficiency. User-facing UI, README, comments, and project documentation remain Russian unless the owner explicitly requests a translation.
 
-- `src/main.js`: share/input parsing, beans, validation/core support; перед изменением
-  найти реальные функции и таблицы, не ориентироваться только на имя схемы.
-- `src/build.js`: публичный `buildFromRequest`, нормализация/передача options.
-- `src/core/mihomo.js`: Mihomo proxies/config/subscriptions;
-  `src/core/yaml.js`: YAML emission, ordinary TUN и Per-Proxy listeners.
-- `src/entry-web4core.js`: browser runtime entry point и публичные exports.
-- `tools/tests/`: существующий native `node:test`; новые тесты следуют этому стилю.
-- `package.json` и lockfile определяют сборку. `npm ci`, затем
-  `npm run build:web:runtime` → **`src/web4core.runtime.js`**.
-- Generated runtime, `src/ui.js`, worker dist руками не редактировать и не добавлять
-  в Git вопреки `.gitignore`. Consumer получает только результат сборки.
-  Textual patches по готовому bundle не вводить.
+## Sources and generated files
 
-## Контракты и scope
+- src/main.js: share/input parsing, beans, validation/core support; before changing anything, find the actual functions and tables instead of relying only on schema names.
+- src/build.js: public buildFromRequest, option normalization/passthrough.
+- src/core/mihomo.js: Mihomo proxies/config/subscriptions.
+- src/core/yaml.js: YAML emission, ordinary TUN, and Per-Proxy listeners.
+- src/entry-web4core.js: browser runtime entry point and public exports.
+- tools/tests/: existing native node:test suite; new tests must follow this style.
+- package.json and the lockfile define the build. Run npm ci, then npm run build:web:runtime -> src/web4core.runtime.js.
+- Never edit generated runtime, src/ui.js, or worker dist by hand, and never add them to Git against .gitignore. The consumer receives only build output. Do not introduce textual patches against the finished bundle.
 
-Новый протокол проходит всю цепочку:
+## Contracts and scope
 
-```text
-share/input parser → bean → validation/core support → Mihomo builder → tests → build
-```
+A new protocol must pass through the whole chain:
 
-Parser сам по себе не доказывает end-to-end поддержку. Добавить позитивные и негативные
-кейсы, сопоставить поля с целевой версией ядра; синхронизировать consumer validator,
-README и docs только после подтверждения всей цепочки и реального `mihomo -t`.
-Новые протоколы добавляются только по отдельной задаче владельца, не попутно.
+~~~text
+share/input parser -> bean -> validation/core support -> Mihomo builder -> tests -> build
+~~~
 
-Backward compatibility: старые вызовы API и дефолты должны сохранять поведение.
-Проверять baseline output; любые отличия классифицировать до миграции consumer.
-Не менять sing-box/xray/AWG и соседние builders без согласованного scope.
-Минимальные diff; сохранять существующий стиль и переводы строк (в upstream есть mixed EOL).
+A parser alone does not prove end-to-end support. Add positive and negative cases, map fields against the target core version, and synchronize the consumer validator, README, and docs only after the full chain and a real mihomo -t check are confirmed.
+New protocols require a separate owner task; do not add them opportunistically.
 
-Текущее расширение MIPS: `buildFromRequest` передаёт `options.mihomoTunStack` в
-`opts.tun.stack`; `buildMihomoYaml` использует его в ordinary TUN и каждом TUN listener.
-Только точное `'mips'` → MIPS; missing/invalid → `'gvisor'`. No-TUN остаётся no-TUN.
-Требование ядра для MIPS — Mihomo >= 1.19.31.
+Backward compatibility: existing API calls and defaults must preserve behavior.
+Check baseline output and classify every difference before migrating the consumer.
+Do not change sing-box/xray/AWG or neighboring builders outside the approved scope.
+Keep diffs minimal and preserve existing style and line endings; upstream contains mixed EOL.
 
-## Обязательные проверки до изменения
+Current MIPS extension: buildFromRequest passes options.mihomoTunStack into opts.tun.stack; buildMihomoYaml uses it for ordinary TUN and every TUN listener.
+Only exact 'mips' selects MIPS; missing/invalid falls back to 'gvisor'. No-TUN remains no-TUN.
+MIPS requires Mihomo >= 1.19.31.
 
-1. Прочитать этот файл и документацию consumer по затронутому контракту.
-2. `git status --short`, `git branch --show-current`, `git remote -v`,
-   `git log -5 --oneline`. Убедиться, что работа ведётся в custom/candidate branch.
-3. При чужих изменениях не перезаписывать их. Определить engine/UI слой и scope.
-4. Изучить source-функции, existing tests и build scripts; зафиксировать baseline
-   consumer runtime и source SHA. Не начинать с редактирования bundle.
+## Mandatory checks before changes
 
-## Обязательные проверки после изменения
+1. Read this file and the consumer documentation for the affected contract.
+2. Run git status --short, git branch --show-current, git remote -v, and git log -5 --oneline. Confirm work is happening on a custom/candidate branch.
+3. Do not overwrite unrelated or foreign changes. Identify whether the change belongs to the engine or UI layer and define scope.
+4. Inspect source functions, existing tests, and build scripts; record the baseline consumer runtime and source SHA. Do not start by editing the bundle.
 
-Команды выполняются последовательно, с остановкой при ненулевом exit code:
+## Mandatory checks after changes
 
-```bash
+Run commands sequentially and stop on any non-zero exit code:
+
+~~~bash
 npm ci
 node --test tools/tests/mihomo-exclude-filter.test.mjs tools/tests/mihomo-tun-stack.test.mjs
 npm run build:web:runtime
@@ -76,47 +65,42 @@ node ../link-generators/tests/runtime.cjs src/web4core.runtime.js
 git diff --check
 git diff --stat
 git status --short
-```
+~~~
 
-Путь соседнего checkout адаптировать к фактическому workspace. Дополнительно:
-сравнить generated runtime с consumer (байты/SHA-256, отдельно учесть CRLF),
-запустить consumer browser suite и baseline; для новых Mihomo output contracts
-запустить настоящий `mihomo -t` целевой версии на синтетических fixtures.
-Не выдавать browser validation за проверку ядром или handshake.
-Тесты других затронутых cores запускать по их контрактам.
-Обновить docs и показать review: файлы, diff-stat, тесты, build, сравнение runtime,
-риски. Commit/push — только после явной инструкции владельца.
+Adapt the neighboring checkout path to the actual workspace. In addition:
+compare the generated runtime with the consumer copy (bytes/SHA-256, accounting for CRLF separately),
+run the consumer browser suite and baseline tests; for new Mihomo output contracts, run a real mihomo -t of the target version on synthetic fixtures.
+Do not present browser validation as a core-level validation or handshake.
+Run tests for other affected cores according to their contracts.
+Update docs and provide a review summary: files, diff-stat, tests, build, runtime comparison, and risks.
+Commit/push only after explicit owner instruction.
 
-## Upstream sync и безопасность
+## Upstream sync and security
 
-Использовать controlled merge: fetch upstream и origin, отдельная candidate branch
-от origin/link-generators, `merge --no-commit --no-ff upstream/main`, review,
-tests/build/consumer regressions, затем разрешённый PR и review до merge.
-Подробная процедура и сравнение вариантов —
-[UPDATES.md](https://github.com/saymer-alt/link-generators/blob/main/docs/UPDATES.md).
-При конфликте остановиться, ничего не публиковать; при необходимости `git merge --abort`.
-При падении тестов не публиковать candidate. Не делать force-push, reset custom branch
-на upstream, подавление конфликтов через blanket ours/theirs или отключение тестов.
-Не включать scheduled auto-merge/rebase без отдельного security review.
+Use a controlled merge: fetch upstream and origin, create a separate candidate branch from origin/link-generators, run merge --no-commit --no-ff upstream/main, review it, run tests/build/consumer regressions, then use an approved PR and review before merge.
+The detailed procedure and option comparison are in [UPDATES.md](https://github.com/saymer-alt/link-generators/blob/main/docs/UPDATES.md).
+If there is a conflict, stop and publish nothing; use git merge --abort when needed.
+If tests fail, do not publish the candidate.
+Do not force-push, reset the custom branch to upstream, suppress conflicts with blanket ours/theirs, or disable tests.
+Do not enable scheduled auto-merge/rebase without a separate security review.
 
-Upstream исходники, npm install scripts и зависимости исполняют код. Перед запуском
-review source/package-lock/build/workflows; CI build/test — без write-token, secrets
-и сохранённых Git credentials. Write-job не должен исполнять внешние исходники
-или generated artifact. Зелёные тесты не заменяют supply-chain review.
+Upstream sources, npm install scripts, and dependencies execute code.
+Before running them, review source/package-lock/build/workflows.
+CI build/test must run without write tokens, secrets, or persisted Git credentials.
+A write job must not execute external source code or a generated artifact.
+Green tests do not replace supply-chain review.
 
-Унаследованный `.github/workflows/build.yml` ориентирован на upstream main, Pages и
-Cloudflare deployment и ожидает secrets. Не включать его в fork и не добавлять secrets
-для «починки CI» без отдельного решения владельца. Он не является custom-branch CI.
-Consumer workflow проверяет custom branch; локальные проверки выше обязательны.
+The inherited .github/workflows/build.yml targets upstream main, Pages, and Cloudflare deployment and expects secrets.
+Do not enable it in the fork or add secrets just to "fix CI" without a separate owner decision.
+It is not the custom-branch CI.
+The consumer workflow validates the custom branch; the local checks above remain mandatory.
 
-Использовать только синтетические TEST-NET адреса и тестовые ключи. Реальные приватные
-конфиги, subscription URLs с credentials, ключи и токены не помещать в fixtures,
-логи, коммиты, issues или сторонние сервисы. Не добавлять телеметрию и сетевые вызовы
-в пользовательские потоки без отдельного согласования.
+Use only synthetic TEST-NET addresses and test keys.
+Never put real private configs, subscription URLs with credentials, keys, or tokens into fixtures, logs, commits, issues, or third-party services.
+Do not add telemetry or network calls to user flows without separate approval.
 
 ## Primary/fallback extension
 
-Optional `fallbackInput` is a generic Mihomo contract; see
-[tools/tests/PRIMARY-FALLBACK.md](tools/tests/PRIMARY-FALLBACK.md).
-Run `node --test tools/tests/mihomo-priority.test.mjs` with existing source tests.
-Consumer-specific whitelist policy stays outside engine.
+Optional fallbackInput is a generic Mihomo contract; see [tools/tests/PRIMARY-FALLBACK.md](tools/tests/PRIMARY-FALLBACK.md).
+Run node --test tools/tests/mihomo-priority.test.mjs together with the existing source tests.
+Consumer-specific whitelist policy stays outside the engine.
