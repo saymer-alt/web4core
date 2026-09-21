@@ -746,7 +746,7 @@ function buildMihomoConfig(beans, opts) {
     const config = {
         'allow-lan': false,
         mode: 'rule',
-        'log-level': 'info',
+        'log-level': 'warning',
         proxies,
         'proxy-groups': groups,
         rules: [`MATCH,${GLOBAL_GROUP_NAME}`]
