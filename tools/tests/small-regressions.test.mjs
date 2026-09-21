@@ -45,3 +45,10 @@ test('comment lines are skipped in Sub Mode proxy text too', () => {
   assert.match(yaml, /name: A/);
   assert.doesNotMatch(yaml, /Unknown link/);
 });
+
+test('mihomo production default uses warning log level', () => {
+  const yaml = build('socks://user:pass@192.0.2.1:1080#A');
+  assert.match(yaml, /^log-level: warning$/m);
+  assert.doesNotMatch(yaml, /^log-level: info$/m);
+});
+
