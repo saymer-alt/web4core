@@ -120,7 +120,7 @@ const MIHOMO_DEFAULT_TEMPLATE = [
     'allow-lan: false',
     'tcp-concurrent: true',
     'mode: rule',
-    'log-level: info',
+    'log-level: warning',
     'ipv6: false',
     'unified-delay: true',
     'profile:',
