@@ -931,7 +931,11 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
     const providers = {};
     const targets = [];
     const providerTargets = [];
-    const probe = { url: getUrlTest(opts), interval: PROXY_FETCH_INTERVAL, 'expected-status': getUrlTestExpectedStatus(opts), lazy: false };
+    // Priority mode answers a routing question: can this proxy establish an HTTP
+    // path to the probe URL? Do not require one exact response code here.
+    // MetaCubeXD's manual /delay probe has the same any-HTTP-response semantics;
+    // strict expected-status checks remain on HTTP providers themselves.
+    const probe = { url: getUrlTest(opts), interval: PROXY_FETCH_INTERVAL, lazy: false };
     for (const [name, side] of [['PRIMARY', primary], ['FALLBACK', fallback]]) {
         const built = side.subUrls.length
             ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts })
