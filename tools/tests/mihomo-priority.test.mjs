@@ -32,6 +32,8 @@ test('independent names, membership, providers, no direct targets', () => {
     assert.deepEqual(cfg.groups[0].proxies, cfg.proxies.map(p => p.name));
     assert.deepEqual(cfg.groups[0].use, Object.keys(cfg.providers));
     assert.equal(cfg.groups[0].filter, '^(PRIMARY-|primary-)`^(FALLBACK-|fallback-)');
+    // GLOBAL must follow manual /delay semantics: any HTTP response proves route reachability.
+    assert.equal(cfg.groups[0]['expected-status'], undefined);
     // Dial-failure health detection (Max case): widened window + low threshold.
     assert.equal(cfg.groups[0].timeout, 60000);
     assert.equal(cfg.groups[0]['max-failed-times'], 2);
@@ -42,7 +44,8 @@ test('independent names, membership, providers, no direct targets', () => {
         assert.equal(hc.enable, true);
         assert.equal(hc.url, cfg.groups[0].url);
         assert.equal(hc.interval, 300);
-        assert.equal(hc['expected-status'], cfg.groups[0]['expected-status']);
+        // Provider health checks stay strict even though GLOBAL is deliberately relaxed.
+        assert.equal(hc['expected-status'], 204);
     }
 });
 test('reject incomplete/unsupported requests and per-proxy combinations', () => {
