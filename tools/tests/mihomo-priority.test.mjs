@@ -62,3 +62,18 @@ test('priority-only fields stay out of the generic output (byte parity)', () => 
     const normal = buildFromRequest({ core: 'mihomo', input: a, options: { addTun: false } }).data;
     assert.doesNotMatch(normal, /max-failed-times|timeout:/);
 });
+
+
+test('priority mode forwards device model to primary and fallback providers', () => {
+    const result = buildFromRequest({
+        core: 'mihomo',
+        input: 'https://example.invalid/primary',
+        fallbackInput: 'https://example.invalid/fallback',
+        options: {
+            mihomoSubscriptionMode: true,
+            deviceModel: 'Keenetic Giga KN-1012'
+        }
+    });
+    assert.equal((result.data.match(/x-device-model:/g) || []).length, 2);
+    assert.match(result.data, /Keenetic Giga KN-1012/);
+});

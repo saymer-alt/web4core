@@ -771,11 +771,13 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
     const usedProviderNames = new Set();
     subscriptionUrls.forEach((url, index) => {
         const providerName = computeProviderName(url, index, subscriptionUrls.length, usedProviderNames);
+        const deviceModel = typeof opts?.deviceModel === 'string' ? opts.deviceModel.trim() : '';
         providers[providerName] = {
             type: 'http',
             proxy: 'DIRECT',
             header: {
-                'x-hwid': [generateSecretHex32()]
+                'x-hwid': [generateSecretHex32()],
+                ...(deviceModel ? { 'x-device-model': [deviceModel] } : {})
             },
             url: url,
             interval: SUB_REFRESH_INTERVAL,
@@ -938,7 +940,7 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
     const probe = { url: getUrlTest(opts), interval: PROXY_FETCH_INTERVAL, lazy: false };
     for (const [name, side] of [['PRIMARY', primary], ['FALLBACK', fallback]]) {
         const built = side.subUrls.length
-            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts })
+            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts, deviceModel: opts?.deviceModel })
             : buildMihomoConfig(side.beans, { urlTest: opts?.urlTest });
         const names = [];
         built.proxies.forEach((proxy, index) => {

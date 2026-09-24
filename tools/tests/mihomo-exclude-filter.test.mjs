@@ -27,3 +27,23 @@ test('public build API forwards the option only in Mihomo subscription mode', ()
     const direct = buildFromRequest({ core: 'mihomo', input: 'socks://user:pass@example.com:1080', options: { excludeFilter: '🇷🇺' } });
     assert(!direct.data.includes('exclude-filter:'));
 });
+
+
+test('device model is optional and applies to every subscription provider', () => {
+    const blank = buildMihomoSubscriptionConfig(urls, [], { deviceModel: '   ' });
+    for (const provider of Object.values(blank.providers)) {
+        assert.deepEqual(Object.keys(provider.header), ['x-hwid']);
+    }
+
+    const cfg = buildMihomoSubscriptionConfig(urls, [], { deviceModel: ' Keenetic Giga KN-1012 ' });
+    for (const provider of Object.values(cfg.providers)) {
+        assert.deepEqual(provider.header['x-device-model'], ['Keenetic Giga KN-1012']);
+    }
+
+    const result = buildFromRequest({
+        core: 'mihomo',
+        input: urls.join('\n'),
+        options: { mihomoSubscriptionMode: true, deviceModel: 'Keenetic Giga KN-1012' }
+    });
+    assert.equal((result.data.match(/x-device-model:/g) || []).length, 2);
+});
