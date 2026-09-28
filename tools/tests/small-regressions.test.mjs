@@ -52,3 +52,30 @@ test('mihomo production default uses warning log level', () => {
   assert.doesNotMatch(yaml, /^log-level: info$/m);
 });
 
+test('disabled Mihomo Web UI ignores invalid hidden custom URL', () => {
+  assert.doesNotThrow(() => buildFromRequest({
+    core: 'mihomo',
+    input: 'trojan://test-only@192.0.2.90:443#WEBUI-OFF',
+    options: {
+      addTun: false,
+      addSocks: true,
+      webUI: false,
+      webUiDashboard: 'custom',
+      webUiCustomUrl: 'not-a-url',
+    },
+  }));
+});
+
+test('enabled Mihomo Web UI still rejects invalid custom URL', () => {
+  assert.throws(() => buildFromRequest({
+    core: 'mihomo',
+    input: 'trojan://test-only@192.0.2.91:443#WEBUI-ON',
+    options: {
+      addTun: false,
+      addSocks: true,
+      webUI: true,
+      webUiDashboard: 'custom',
+      webUiCustomUrl: 'not-a-url',
+    },
+  }), /Invalid Web UI URL/);
+});
