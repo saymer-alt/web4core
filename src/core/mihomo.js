@@ -892,15 +892,6 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         extraProxies.forEach(p => {
             if (usePerProxyListeners) {
                 attachPerProxySelectGroup(groups, p);
-            } else if (fastestGroup) {
-                if (!Array.isArray(fastestGroup.proxies)) fastestGroup.proxies = [];
-                if (!fastestGroup.proxies.includes(p.name)) fastestGroup.proxies.push(p.name);
-            }
-        });
-    }
-
-    if (usePerProxyListeners) {
-                attachPerProxySelectGroup(groups, p);
             } else {
                 if (fastestGroup) {
                     if (!Array.isArray(fastestGroup.proxies)) fastestGroup.proxies = [];
