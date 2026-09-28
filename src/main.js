@@ -8,6 +8,17 @@ function decodeBase64Url(input) {
     }
 }
 
+function decodeBase64UrlUtf8(input) {
+    const binary = decodeBase64Url(input);
+    if (!binary) return '';
+    try {
+        const bytes = Uint8Array.from(binary, ch => ch.charCodeAt(0));
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+        return binary;
+    }
+}
+
 function safeDecodeURIComponent(input) {
     const s = (input ?? '').toString();
     if (!s) return '';
@@ -783,7 +794,7 @@ function parseVMess(urlStr) {
     const payloadRaw = urlStr.slice('vmess://'.length);
     let payload = (payloadRaw || '').split('#')[0].split('?')[0];
     const tryDecode = (s) => {
-        const decoded = decodeBase64Url(s || '');
+        const decoded = decodeBase64UrlUtf8(s || '');
         const obj = decoded ? tryJSON(decoded) : null;
         return obj;
     };
