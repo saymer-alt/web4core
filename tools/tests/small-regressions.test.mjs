@@ -52,3 +52,36 @@ test('mihomo production default uses warning log level', () => {
   assert.doesNotMatch(yaml, /^log-level: info$/m);
 });
 
+test('vmess JSON preserves UTF-8 proxy names', () => {
+  const payload = Buffer.from(JSON.stringify({
+    v: '2',
+    ps: 'Москва 🚀',
+    add: '192.0.2.77',
+    port: '443',
+    id: '00000000-0000-4000-8000-000000000001',
+    aid: '0',
+    net: 'tcp',
+    type: 'none',
+    tls: '',
+  }), 'utf8').toString('base64');
+
+  const yaml = build('vmess://' + payload);
+  assert.match(yaml, /name: "Москва 🚀"/);
+});
+
+test('vmess ASCII names remain unchanged', () => {
+  const payload = Buffer.from(JSON.stringify({
+    v: '2',
+    ps: 'TEST-VMESS',
+    add: '192.0.2.78',
+    port: '443',
+    id: '00000000-0000-4000-8000-000000000001',
+    aid: '0',
+    net: 'tcp',
+    type: 'none',
+    tls: '',
+  }), 'utf8').toString('base64');
+
+  const yaml = build('vmess://' + payload);
+  assert.match(yaml, /name: TEST-VMESS/);
+});
