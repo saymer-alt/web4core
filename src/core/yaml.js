@@ -1,32 +1,15 @@
 function quoteYamlString(value) {
-    // JSON string literals are valid YAML double-quoted scalars and correctly
-    // escape quotes, backslashes, control characters and line breaks.
+    // JSON string literals are valid YAML double-quoted scalars. Quoting every
+    // JavaScript string avoids implicit YAML resolution changing its type/value
+    // (booleans, numbers, timestamps, null-like tokens, etc.).
     return JSON.stringify(String(value));
 }
 
-function isYamlPlainStringSafe(value) {
-    const s = String(value);
-    if (!/^[A-Za-z0-9_.:@#\-]+$/.test(s)) return false;
-    if (s.startsWith('#') || s === ':' || s === '-') return false;
-
-    // Values resolved by common YAML schemas as non-strings must stay strings.
-    if (/^(?:null|true|false|\.nan|[+-]?\.inf)$/i.test(s)) return false;
-    if (/^[+-]?(?:[0-9][0-9_]*|0[bBoOxX][0-9A-Fa-f_]+)$/.test(s)) return false;
-    if (/^[+-]?(?:(?:[0-9][0-9_]*)?\.[0-9_]+|[0-9][0-9_]*\.)(?:[eE][+-]?[0-9]+)?$/.test(s)) return false;
-    if (/^[+-]?[0-9][0-9_]*[eE][+-]?[0-9]+$/.test(s)) return false;
-    if (/^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt ]|$)/.test(s)) return false;
-
-    return true;
-}
-
-function toYamlScalar(value, key) {
+function toYamlScalar(value) {
     if (value === null || value === undefined) return '';
     if (typeof value === 'boolean') return value ? 'true' : 'false';
     if (typeof value === 'number') return String(value);
-    const s = String(value);
-    if (key === 'exclude-filter' || key === 'grpc-service-name') return quoteYamlString(s);
-    if (isYamlPlainStringSafe(s)) return s;
-    return quoteYamlString(s);
+    return quoteYamlString(value);
 }
 
 function toYAML(obj, indent = 0) {
