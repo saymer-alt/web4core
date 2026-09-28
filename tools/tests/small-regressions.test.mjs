@@ -68,6 +68,12 @@ test('mihomo YAML preserves scalar-like and control-character strings', () => {
     ['.inf', '".inf"'],
     ['#abc', '"#abc"'],
     ['2026-09-28', '"2026-09-28"'],
+    ['yes', '"yes"'],
+    ['no', '"no"'],
+    ['on', '"on"'],
+    ['off', '"off"'],
+    ['~', '"~"'],
+    ['12:34:56', '"12:34:56"'],
     ['a\nb', '"a\\nb"'],
   ];
 
@@ -77,8 +83,10 @@ test('mihomo YAML preserves scalar-like and control-character strings', () => {
   }
 });
 
-test('mihomo YAML keeps ordinary plain strings byte-compatible', () => {
+test('mihomo YAML quotes ordinary strings while preserving typed scalars', () => {
   const yaml = build('trojan://test-only@192.0.2.1:443#TEST-A');
-  assert.ok(yaml.split('\n').includes('    password: test-only'));
-  assert.ok(yaml.split('\n').includes('  - name: TEST-A'));
+  assert.ok(yaml.split('\n').includes('    password: "test-only"'));
+  assert.ok(yaml.split('\n').includes('  - name: "TEST-A"'));
+  assert.match(yaml, /^\s+port: 443$/m);
+  assert.match(yaml, /^\s+udp: true$/m);
 });
