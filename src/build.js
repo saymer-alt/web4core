@@ -134,9 +134,12 @@ export function buildFromRequest(req) {
   const wgBeans = Array.isArray(req?.wgBeans) ? req.wgBeans : [];
   options.urlTest = resolveUrlTest(options.urlTest);
 
-  // Selectable external dashboard: metacubexd (default, byte-parity with
-  // legacy output), yacd-meta, zashboard, or a validated custom archive URL.
-  options.webUiUrl = resolveWebUiUrl(options);
+  // Selectable external dashboard matters only when Web UI is enabled.
+  // An explicitly disabled feature must not validate or resolve its hidden
+  // dashboard settings. When omitted, preserve the core defaults below:
+  // Mihomo=true, Sing-box=false, Xray effectively unused.
+  const effectiveWebUi = options.webUI === undefined ? core === 'mihomo' : !!options.webUI;
+  options.webUiUrl = effectiveWebUi ? resolveWebUiUrl(options) : undefined;
   // Selective modern REALITY: [{host, port?}] — only matched REALITY nodes
   // get support-x25519mlkem768 (+ default chrome fingerprint); absent/empty
   // keeps the legacy output byte-for-byte.
