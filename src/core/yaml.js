@@ -11,9 +11,10 @@ function isYamlPlainStringSafe(value) {
 
     // Values resolved by common YAML schemas as non-strings must stay strings.
     if (/^(?:null|true|false|\.nan|[+-]?\.inf)$/i.test(s)) return false;
-    if (/^[+-]?(?:0|[1-9][0-9_]*|0[bBoOxX][0-9A-Fa-f_]+)$/.test(s)) return false;
+    if (/^[+-]?(?:[0-9][0-9_]*|0[bBoOxX][0-9A-Fa-f_]+)$/.test(s)) return false;
     if (/^[+-]?(?:(?:[0-9][0-9_]*)?\.[0-9_]+|[0-9][0-9_]*\.)(?:[eE][+-]?[0-9]+)?$/.test(s)) return false;
     if (/^[+-]?[0-9][0-9_]*[eE][+-]?[0-9]+$/.test(s)) return false;
+    if (/^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt ]|$)/.test(s)) return false;
 
     return true;
 }
