@@ -52,3 +52,32 @@ test('mihomo production default uses warning log level', () => {
   assert.doesNotMatch(yaml, /^log-level: info$/m);
 });
 
+
+
+test('mihomo YAML preserves scalar-like and control-character strings', () => {
+  const cases = [
+    ['true', '"true"'],
+    ['false', '"false"'],
+    ['null', '"null"'],
+    ['00123', '"00123"'],
+    ['123', '"123"'],
+    ['0x10', '"0x10"'],
+    ['1e3', '"1e3"'],
+    ['1.2', '"1.2"'],
+    ['.nan', '".nan"'],
+    ['.inf', '".inf"'],
+    ['#abc', '"#abc"'],
+    ['a\\nb', '"a\\\\nb"'],
+  ];
+
+  for (const [password, expected] of cases) {
+    const yaml = build('trojan://' + encodeURIComponent(password) + '@192.0.2.1:443#SCALAR');
+    assert.ok(yaml.split('\\n').includes('    password: ' + expected), password);
+  }
+});
+
+test('mihomo YAML keeps ordinary plain strings byte-compatible', () => {
+  const yaml = build('trojan://test-only@192.0.2.1:443#TEST-A');
+  assert.ok(yaml.split('\\n').includes('    password: test-only'));
+  assert.ok(yaml.split('\\n').includes('    name: TEST-A'));
+});
