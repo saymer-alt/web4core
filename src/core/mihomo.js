@@ -592,67 +592,24 @@ function buildMihomoProxy(bean) {
 }
 
 function deduplicateProxies(beans) {
-    const toKeyPart = (v) => {
-        if (v === null || v === undefined) return '';
-        if (Array.isArray(v)) return v.map(toKeyPart).join(',');
-        return String(v);
-    };
-    const stableObjectKey = (obj) => {
-        if (!obj || typeof obj !== 'object') return '';
-        const keys = Object.keys(obj).sort();
-        return keys.map(k => `${k}=${toKeyPart(obj[k])}`).join('&');
-    };
-    const wireguardExtraKey = (wg) => {
-        const peers = Array.isArray(wg?.peers) ? wg.peers : [];
-        const peersKey = peers.map(p => {
-            const allowed = Array.isArray(p?.allowedIPs) ? p.allowedIPs.map(toKeyPart).join(',') : '';
-            const reserved = (p && p.reserved !== undefined) ? toKeyPart(p.reserved) : '';
-            return [
-                toKeyPart(p?.server),
-                toKeyPart(p?.port),
-                toKeyPart(p?.publicKey),
-                toKeyPart(p?.preSharedKey),
-                allowed,
-                reserved
-            ].join('|');
-        }).join(';');
-        const dns = Array.isArray(wg?.dns) ? wg.dns.map(toKeyPart).join(',') : '';
-        const allowedIPs = Array.isArray(wg?.allowedIPs) ? wg.allowedIPs.map(toKeyPart).join(',') : '';
-        return [
-            `pk=${toKeyPart(wg?.privateKey)}`,
-            `pub=${toKeyPart(wg?.publicKey)}`,
-            `psk=${toKeyPart(wg?.preSharedKey)}`,
-            `ip=${toKeyPart(wg?.ip)}`,
-            `ipv6=${toKeyPart(wg?.ipv6)}`,
-            `allowed=${allowedIPs}`,
-            `res=${toKeyPart(wg?.reserved)}`,
-            `mtu=${toKeyPart(wg?.mtu)}`,
-            `keepalive=${toKeyPart(wg?.persistentKeepalive)}`,
-            `udp=${toKeyPart(wg?.udp)}`,
-            `remoteDnsResolve=${toKeyPart(wg?.remoteDnsResolve)}`,
-            `dns=${dns}`,
-            `ipStack=${stableObjectKey(wg?.ipStack)}`,
-            `refreshServerIPInterval=${toKeyPart(wg?.refreshServerIPInterval)}`,
-            `workers=${toKeyPart(wg?.workers)}`,
-            `awg=${stableObjectKey(wg?.['amnezia-wg-option'])}`,
-            `peers=${peersKey}`
-        ].join('&');
-    };
-    const seen = new Set();
-    return beans.filter(b => {
-        const auth = b.auth?.uuid || b.auth?.password || b.ss?.password || b.socks?.username || '';
-        const network = b.stream?.network || 'tcp';
-        const security = b.stream?.security || '';
-        const flow = b.auth?.flow || '';
-        const supportX25519MLKEM768 = b.stream?.reality?.supportX25519MLKEM768;
-        const mlkemKey = typeof supportX25519MLKEM768 === 'boolean'
-            ? String(supportX25519MLKEM768)
-            : '';
-        let extra = '';
-        if (b.proto === 'wireguard') {
-            extra = wireguardExtraKey(b.wireguard || {});
+    const stableKey = (value) => {
+        if (value === null) return 'null';
+        if (Array.isArray(value)) return '[' + value.map(stableKey).join(',') + ']';
+        if (value && typeof value === 'object') {
+            return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + stableKey(value[k])).join(',') + '}';
         }
-        const key = `${b.proto}|${b.host}|${b.port}|${auth}|${network}|${security}|${flow}|${mlkemKey}|${extra}`;
+        return JSON.stringify(value);
+    };
+
+    const seen = new Set();
+    return beans.filter(bean => {
+        // Deduplicate by the actual Mihomo semantics we emit, not by a partial
+        // hand-maintained subset of bean fields. Different labels may still
+        // represent the same proxy, so name is intentionally excluded.
+        const proxy = buildMihomoProxy(bean);
+        const identity = { ...proxy };
+        delete identity.name;
+        const key = stableKey(identity);
         if (seen.has(key)) return false;
         seen.add(key);
         return true;
