@@ -52,3 +52,95 @@ test('mihomo production default uses warning log level', () => {
   assert.doesNotMatch(yaml, /^log-level: info$/m);
 });
 
+
+
+test('mihomo YAML preserves scalar-like and control-character strings', () => {
+  const cases = [
+    ['true', '"true"'],
+    ['false', '"false"'],
+    ['null', '"null"'],
+    ['00123', '"00123"'],
+    ['123', '"123"'],
+    ['0x10', '"0x10"'],
+    ['1e3', '"1e3"'],
+    ['1.2', '"1.2"'],
+    ['.nan', '".nan"'],
+    ['.inf', '".inf"'],
+    ['#abc', '"#abc"'],
+    ['2026-09-28', '"2026-09-28"'],
+    ['a\nb', '"a\\nb"'],
+  ];
+
+  for (const [password, expected] of cases) {
+    const yaml = build('trojan://' + encodeURIComponent(password) + '@192.0.2.1:443#SCALAR');
+    assert.ok(yaml.split('\n').includes('    password: ' + expected), password);
+  }
+});
+
+test('mihomo YAML keeps ordinary plain strings byte-compatible', () => {
+  const yaml = build('trojan://test-only@192.0.2.1:443#TEST-A');
+  assert.ok(yaml.split('\n').includes('    password: test-only'));
+  assert.ok(yaml.split('\n').includes('  - name: TEST-A'));
+});
+
+test('vmess JSON preserves UTF-8 proxy names', () => {
+  const payload = Buffer.from(JSON.stringify({
+    v: '2',
+    ps: 'Москва 🚀',
+    add: '192.0.2.77',
+    port: '443',
+    id: '00000000-0000-4000-8000-000000000001',
+    aid: '0',
+    net: 'tcp',
+    type: 'none',
+    tls: '',
+  }), 'utf8').toString('base64');
+
+  const yaml = build('vmess://' + payload);
+  assert.match(yaml, /name: "Москва 🚀"/);
+});
+
+test('vmess ASCII names remain unchanged', () => {
+  const payload = Buffer.from(JSON.stringify({
+    v: '2',
+    ps: 'TEST-VMESS',
+    add: '192.0.2.78',
+    port: '443',
+    id: '00000000-0000-4000-8000-000000000001',
+    aid: '0',
+    net: 'tcp',
+    type: 'none',
+    tls: '',
+  }), 'utf8').toString('base64');
+
+  const yaml = build('vmess://' + payload);
+  assert.match(yaml, /name: TEST-VMESS/);
+});
+
+test('disabled Mihomo Web UI ignores invalid hidden custom URL', () => {
+  assert.doesNotThrow(() => buildFromRequest({
+    core: 'mihomo',
+    input: 'trojan://test-only@192.0.2.90:443#WEBUI-OFF',
+    options: {
+      addTun: false,
+      addSocks: true,
+      webUI: false,
+      webUiDashboard: 'custom',
+      webUiCustomUrl: 'not-a-url',
+    },
+  }));
+});
+
+test('enabled Mihomo Web UI still rejects invalid custom URL', () => {
+  assert.throws(() => buildFromRequest({
+    core: 'mihomo',
+    input: 'trojan://test-only@192.0.2.91:443#WEBUI-ON',
+    options: {
+      addTun: false,
+      addSocks: true,
+      webUI: true,
+      webUiDashboard: 'custom',
+      webUiCustomUrl: 'not-a-url',
+    },
+  }), /Invalid Web UI URL/);
+});
