@@ -80,5 +80,5 @@ test('mihomo YAML preserves scalar-like and control-character strings', () => {
 test('mihomo YAML keeps ordinary plain strings byte-compatible', () => {
   const yaml = build('trojan://test-only@192.0.2.1:443#TEST-A');
   assert.ok(yaml.split('\n').includes('    password: test-only'));
-  assert.ok(yaml.split('\n').includes('    name: TEST-A'));
+  assert.ok(yaml.split('\n').includes('  - name: TEST-A'));
 });
