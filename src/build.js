@@ -184,6 +184,8 @@ export function buildFromRequest(req) {
     return { kind: 'yaml', data: buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, [], {
       addSocks: !!options.addSocks, webUI: !!options.webUI,
       webUiUrl: options.webUiUrl,
+      wgDialerProxy: options.wgDialerProxy,
+      wgDialerGroupMembers: options.wgDialerGroupMembers,
       tun: options.addTun ? { mode: 'tun', stack: options.mihomoTunStack } : null,
     }) };
   }
@@ -294,6 +296,8 @@ export function buildFromRequest(req) {
       addSocks,
       webUI,
       webUiUrl: options.webUiUrl,
+      wgDialerProxy: options.wgDialerProxy,
+      wgDialerGroupMembers: options.wgDialerGroupMembers,
       tun: mihomoTunOpts,
     });
     return { kind: 'yaml', data: yaml };
@@ -305,6 +309,8 @@ export function buildFromRequest(req) {
     addSocks,
     webUI,
     webUiUrl: options.webUiUrl,
+    wgDialerProxy: options.wgDialerProxy,
+    wgDialerGroupMembers: options.wgDialerGroupMembers,
     tun: mihomoTunOpts,
   });
   return { kind: 'yaml', data: yaml };
