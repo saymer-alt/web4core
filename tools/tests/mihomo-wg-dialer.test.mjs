@@ -143,3 +143,66 @@ test('AWL priority path also emits dialer-proxy for wireguard beans', () => {
   // target must reference the FINAL generated name (fail-closed validation).
   assert.ok(/dialer-proxy: ["']?PRIMARY-1: PRIMARY-1["']?/.test(yaml));
 });
+
+// ---- Variant C: provider-backed dialer group (use:) ----
+
+const GEO_URL = 'https://account.geodema.org/api/sub?token=test';
+const GEO_URL2 = 'https://account.geodema.org/api/sub2?token=test';
+
+const subBuild = (extraOpts) => buildFromRequest({
+  core: 'mihomo',
+  input: GEO_URL + '\n' + GEO_URL2 + '\ntrojan://p@203.0.113.20:443#VPS-SE',
+  wgBeans: [parseWireGuardConf(WARP_CONF, 'WARP')],
+  options: Object.assign({}, opts, { mihomoSubscriptionMode: true }, extraOpts),
+}).data;
+
+test('variant C: provider-backed group is created via use: and WG dials through it', () => {
+  const yaml = subBuild({ wgDialerProxy: 'WARP-DIALER', wgDialerProviders: [GEO_URL] });
+  assert.ok(/- name: WARP-DIALER\s*\n\s*type: select\s*\n\s*use:\s*\n\s*- account\.geodema\.org/.test(yaml), 'group with use: emitted');
+  assert.ok(!/- name: WARP-DIALER[\s\S]*?proxies:/.test(yaml.slice(yaml.indexOf('- name: WARP-DIALER'), yaml.indexOf('- name: WARP-DIALER') + 200)), 'no static proxies in provider group');
+  assert.ok(/dialer-proxy: WARP-DIALER/.test(proxyBlock(yaml, 'WARP')));
+});
+
+test('variant C: multiple providers produce multiple use entries', () => {
+  const yaml = subBuild({ wgDialerProxy: 'WARP-DIALER', wgDialerProviders: [GEO_URL, GEO_URL2] });
+  const block = yaml.slice(yaml.indexOf('- name: WARP-DIALER'), yaml.indexOf('⚡ Fastest'));
+  assert.equal((block.match(/^\s+- account\.geodema\.org(-2)?$/gm) || []).length, 2, 'two use entries');
+  assert.ok(/dialer-proxy: WARP-DIALER/.test(proxyBlock(yaml, 'WARP')));
+});
+
+test('variant C: members and providers combine into one group (proxies + use)', () => {
+  const yaml = subBuild({ wgDialerProxy: 'WARP-DIALER', wgDialerGroupMembers: ['VPS-SE'], wgDialerProviders: [GEO_URL] });
+  const block = yaml.slice(yaml.indexOf('- name: WARP-DIALER'), yaml.indexOf('⚡ Fastest'));
+  assert.ok(block.includes('proxies:'), 'proxies present');
+  assert.ok(block.includes('use:'), 'use present');
+  assert.ok(/dialer-proxy: WARP-DIALER/.test(proxyBlock(yaml, 'WARP')));
+  assert.ok(!proxyBlock(yaml, 'VPS-SE').includes('dialer-proxy'), 'transit member exempt');
+});
+
+test('variant C: default group name when target omitted', () => {
+  const yaml = subBuild({ wgDialerProviders: [GEO_URL] });
+  assert.ok(/- name: WARP-DIALER\s*\n\s*type: select\s*\n\s*use:/.test(yaml));
+});
+
+test('variant C: unknown provider URL fails closed', () => {
+  assert.throws(() => subBuild({ wgDialerProxy: 'WARP-DIALER', wgDialerProviders: ['https://ghost.example.com/sub'] }),
+    /dialer provider URL not found/);
+});
+
+test('variant C: provider URL without subscription mode fails closed', () => {
+  assert.throws(() => build(['trojan://p@203.0.113.21:443#T21'], [WARP_CONF],
+    { wgDialerProxy: 'WARP-DIALER', wgDialerProviders: [GEO_URL] }),
+    /dialer provider URL not found/);
+});
+
+test('variant C: group name conflict still rejected', () => {
+  assert.throws(() => subBuild({ wgDialerProxy: 'VPS-SE', wgDialerProviders: [GEO_URL] }),
+    /conflicts with an existing proxy or group/);
+});
+
+test('variant C: provider-backed group cannot contain the WG proxy (no loop by construction)', () => {
+  const yaml = subBuild({ wgDialerProxy: 'WARP-DIALER', wgDialerProviders: [GEO_URL] });
+  // The only dialer user is the WG proxy itself; the group has no static proxies.
+  const block = yaml.slice(yaml.indexOf('- name: WARP-DIALER'), yaml.indexOf('⚡ Fastest'));
+  assert.ok(!/^s+- WARP$/m.test(block), 'WG name absent from provider group members');
+});

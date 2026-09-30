@@ -167,32 +167,60 @@ const MIHOMO_WG_DIALER_DEFAULT_GROUP = 'WARP-DIALER';
 // the value must name an existing proxy or proxy-group; the target's UDP relay
 // carries the WireGuard handshake, so TCP-only targets (http) cannot serve WG.
 // opts.wgDialerProxy — target name (Variant A) or the name of the auto-created
-// select group (Variant B); opts.wgDialerGroupMembers — Variant B member list.
-// WireGuard proxies are exempt when they ARE the target (a transit WG profile
-// must dial directly) or when they are listed as group members (same reason);
-// otherwise a member dialing through a group that selects itself would loop at
-// dial time — a cycle Mihomo's static validator does not catch.
-function resolveMihomoWgDialer(proxies, groups, opts) {
+// select group (Variant B/C); opts.wgDialerGroupMembers — Variant B static
+// member list; opts.wgDialerProviders — Variant C list of subscription URLs
+// already present in `providers` (resolved to provider names via their url
+// field; node types are unknown at build time — UDP support must be picked
+// manually in the dashboard). Members and providers combine into one select
+// group (proxies + use). WireGuard proxies are exempt when they ARE the target
+// (a transit WG profile must dial directly) or when they are listed as group
+// members (same reason); otherwise a member dialing through a group that
+// selects itself would loop at dial time — a cycle Mihomo's static validator
+// does not catch. A provider-backed group can never contain the WG proxy
+// itself, because providers are separate from static proxies.
+function resolveMihomoWgDialer(proxies, groups, providers, opts) {
     const target = String((opts && opts.wgDialerProxy) || '').trim();
     const membersRaw = (opts && Array.isArray(opts.wgDialerGroupMembers)) ? opts.wgDialerGroupMembers : [];
     const members = membersRaw.map((s) => String(s).trim()).filter(Boolean);
-    if (!target && members.length === 0) return null;
+    const providersRaw = (opts && Array.isArray(opts.wgDialerProviders)) ? opts.wgDialerProviders : [];
+    const providerUrls = providersRaw.map((s) => String(s).trim()).filter(Boolean);
+    if (!target && members.length === 0 && providerUrls.length === 0) return null;
     const proxyList = Array.isArray(proxies) ? proxies : [];
     const groupList = Array.isArray(groups) ? groups : [];
     const proxyNames = new Set(proxyList.map((p) => String((p && p.name) || '')));
     const groupNames = new Set(groupList.map((g) => String((g && g.name) || '')));
     const groupName = target || MIHOMO_WG_DIALER_DEFAULT_GROUP;
-    if (members.length) {
-        // Variant B: the group name must be fresh; members must reference
-        // statically known proxies (or DIRECT).
+    if (members.length || providerUrls.length) {
+        // Variant B/C: the group name must be fresh (this also rejects
+        // GLOBAL/⚡ Fastest, which contain the WG proxy itself).
         if (proxyNames.has(groupName) || groupNames.has(groupName)) {
             throw new Error(`Mihomo: dialer group name "${groupName}" conflicts with an existing proxy or group`);
         }
-        const missing = members.filter((m) => m !== 'DIRECT' && !proxyNames.has(m));
-        if (missing.length) {
-            throw new Error(`Mihomo: dialer group member(s) not found among proxies: ${missing.join(', ')}`);
+        if (members.length) {
+            const missing = members.filter((m) => m !== 'DIRECT' && !proxyNames.has(m));
+            if (missing.length) {
+                throw new Error(`Mihomo: dialer group member(s) not found among proxies: ${missing.join(', ')}`);
+            }
         }
-        return { target: groupName, members: new Set(members), group: { name: groupName, type: 'select', proxies: members.slice() } };
+        const providerNames = [];
+        if (providerUrls.length) {
+            const providerList = (providers && typeof providers === 'object' && !Array.isArray(providers)) ? providers : {};
+            const urlToName = new Map();
+            Object.entries(providerList).forEach(([name, provider]) => {
+                if (provider && typeof provider === 'object' && provider.url) urlToName.set(String(provider.url), name);
+            });
+            for (const url of providerUrls) {
+                const name = urlToName.get(url);
+                if (!name) {
+                    throw new Error(`Mihomo: dialer provider URL not found among proxy-providers (enable URL-подписки mode and pass the same URL): ${url}`);
+                }
+                providerNames.push(name);
+            }
+        }
+        const group = { name: groupName, type: 'select' };
+        if (members.length) group.proxies = members.slice();
+        if (providerNames.length) group.use = providerNames;
+        return { target: groupName, members: new Set(members), group };
     }
     // Variant A: the target must exist (mirrors mihomo config validation).
     if (target !== 'DIRECT' && !proxyNames.has(target) && !groupNames.has(target)) {
@@ -219,7 +247,7 @@ function applyMihomoWgDialer(proxies, dialer) {
 
 function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
     opts = opts || {};
-    const wgDialer = resolveMihomoWgDialer(proxies, groups, opts);
+    const wgDialer = resolveMihomoWgDialer(proxies, groups, providers, opts);
     if (wgDialer && wgDialer.group) groups = [wgDialer.group, ...groups];
     if (wgDialer) proxies = applyMihomoWgDialer(proxies, wgDialer);
     const addSocks = opts.addSocks !== false;

@@ -186,6 +186,7 @@ export function buildFromRequest(req) {
       webUiUrl: options.webUiUrl,
       wgDialerProxy: options.wgDialerProxy,
       wgDialerGroupMembers: options.wgDialerGroupMembers,
+      wgDialerProviders: options.wgDialerProviders,
       tun: options.addTun ? { mode: 'tun', stack: options.mihomoTunStack } : null,
     }) };
   }
@@ -298,6 +299,7 @@ export function buildFromRequest(req) {
       webUiUrl: options.webUiUrl,
       wgDialerProxy: options.wgDialerProxy,
       wgDialerGroupMembers: options.wgDialerGroupMembers,
+      wgDialerProviders: options.wgDialerProviders,
       tun: mihomoTunOpts,
     });
     return { kind: 'yaml', data: yaml };
@@ -311,6 +313,7 @@ export function buildFromRequest(req) {
     webUiUrl: options.webUiUrl,
     wgDialerProxy: options.wgDialerProxy,
     wgDialerGroupMembers: options.wgDialerGroupMembers,
+    wgDialerProviders: options.wgDialerProviders,
     tun: mihomoTunOpts,
   });
   return { kind: 'yaml', data: yaml };
