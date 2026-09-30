@@ -309,3 +309,147 @@ test('plain configs without dialer edges are unaffected by the detector', () => 
   assert.ok(yaml.includes('type: wireguard'));
   assert.ok(!yaml.includes('dialer-proxy'));
 });
+
+// ---- analyzeDialerGraph: centralized dependency-graph API for the page validator ----
+
+import { analyzeDialerGraph } from '../../src/core/yaml.js';
+
+const b64 = (n) => Buffer.alloc(32, n).toString('base64');
+
+test('analyzeDialerGraph: valid chains return no cycles', () => {
+  const doc = {
+    proxies: [
+      { name: 'WG-B', type: 'wireguard', server: '192.0.2.72', port: 51820, 'private-key': b64(2), 'public-key': b64(12), ip: '10.66.2.2' },
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'WG-B' },
+    ],
+    'proxy-groups': [],
+    'proxy-providers': {},
+  };
+  const res = analyzeDialerGraph(doc);
+  assert.equal(res.cycles.length, 0);
+  assert.equal(res.dynamicGroups.length, 0);
+});
+
+test('analyzeDialerGraph: cycle routes are readable end-to-end', () => {
+  const doc = {
+    proxies: [
+      { name: 'WG-B', type: 'wireguard', server: '192.0.2.72', port: 51820, 'private-key': b64(2), 'public-key': b64(12), ip: '10.66.2.2', 'dialer-proxy': 'GROUP-B' },
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'GROUP-A' },
+    ],
+    'proxy-groups': [
+      { name: 'GROUP-A', type: 'select', proxies: ['WG-B'] },
+      { name: 'GROUP-B', type: 'select', proxies: ['WG-A'] },
+    ],
+    'proxy-providers': {},
+  };
+  const res = analyzeDialerGraph(doc);
+  // Both WGs are dialer roots in this fixture: the API reports the cycle from
+  // each start (same shape, two entry points) with the full readable route.
+  assert.equal(res.cycles.length, 2);
+  for (const c of res.cycles) {
+    const route = c.route.join(' -> ');
+    assert.ok(route.startsWith(c.start) && route.endsWith(c.start), 'route returns to start: ' + route);
+    assert.ok(route.includes('GROUP-A') && route.includes('GROUP-B'), 'route names every hop: ' + route);
+  }
+});
+
+test('analyzeDialerGraph: provider-backed groups are flagged dynamic (not silently safe)', () => {
+  const doc = {
+    proxies: [
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'P-GROUP' },
+    ],
+    'proxy-groups': [{ name: 'P-GROUP', type: 'select', use: ['prov'] }],
+    'proxy-providers': { prov: { type: 'http', url: 'https://example.invalid/sub' } },
+  };
+  const res = analyzeDialerGraph(doc);
+  assert.equal(res.cycles.length, 0, 'no static cycle provable');
+  assert.deepEqual(res.dynamicGroups, ['P-GROUP'], 'dynamic dependency surfaced');
+});
+
+test('analyzeDialerGraph: provider override.dialer-proxy closes the loop and is reported', () => {
+  const doc = {
+    proxies: [
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'P-GROUP' },
+    ],
+    'proxy-groups': [{ name: 'P-GROUP', type: 'select', use: ['prov'] }],
+    'proxy-providers': { prov: { type: 'http', url: 'https://example.invalid/sub', override: { 'dialer-proxy': 'WG-A' } } },
+  };
+  const res = analyzeDialerGraph(doc);
+  assert.equal(res.cycles.length, 1);
+  assert.ok(res.cycles[0].route.includes('WG-A'));
+});
+
+test('analyzeDialerGraph: WG-A -> static group -> TUIC is a valid composition', () => {
+  const doc = {
+    proxies: [
+      { name: 'TUIC-1', type: 'tuic', server: '203.0.113.40', port: 443, uuid: '00000000-0000-4000-8000-0000000000e1', password: 'p' },
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'TRANSIT' },
+    ],
+    'proxy-groups': [{ name: 'TRANSIT', type: 'select', proxies: ['TUIC-1', 'DIRECT'] }],
+    'proxy-providers': {},
+  };
+  const res = analyzeDialerGraph(doc);
+  assert.equal(res.cycles.length, 0);
+  assert.equal(res.dynamicGroups.length, 0);
+});
+
+test('buildFromRequest still fails closed when a manual graph cycles', () => {
+  const proxies = [
+    { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'WG-B' },
+    { name: 'WG-B', type: 'wireguard', server: '192.0.2.72', port: 51820, 'private-key': b64(2), 'public-key': b64(12), ip: '10.66.2.2', 'dialer-proxy': 'WG-A' },
+  ];
+  assert.throws(() => buildFromRequest({ core: 'mihomo', input: '', wgBeans: [], options: opts }), /No valid links/);
+  // cycle via buildMihomoYaml directly
+  assert.throws(() => buildMihomoYaml(proxies, [], null, [], [], opts), /circular dialer-proxy dependency/);
+});
+
+
+test('mixed proxies+use group without cycle is valid (both edge categories walkable)', () => {
+  const doc = {
+    proxies: [
+      { name: 'TUIC-1', type: 'tuic', server: '203.0.113.40', port: 443, uuid: '00000000-0000-4000-8000-0000000000e1', password: 'p' },
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'MIXED' },
+    ],
+    'proxy-groups': [{ name: 'MIXED', type: 'select', proxies: ['TUIC-1'], use: ['prov'] }],
+    'proxy-providers': { prov: { type: 'http', url: 'https://example.invalid/sub' } },
+  };
+  const res = analyzeDialerGraph(doc);
+  assert.equal(res.cycles.length, 0, 'no cycle through the static member');
+  assert.deepEqual(res.dynamicGroups, ['MIXED']);
+  assert.deepEqual(res.dynamicProviders, ['prov'], 'provider without override is dynamic/unknown');
+});
+
+test('cycle through the static member of a mixed group is rejected', () => {
+  const doc = {
+    proxies: [
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'MIXED' },
+    ],
+    'proxy-groups': [{ name: 'MIXED', type: 'select', proxies: ['WG-A'], use: ['prov'] }],
+    'proxy-providers': { prov: { type: 'http', url: 'https://example.invalid/sub' } },
+  };
+  const res = analyzeDialerGraph(doc);
+  assert.equal(res.cycles.length, 1, 'static-member edge of a mixed group participates');
+});
+
+test('cycle through the provider override of a mixed group is rejected', () => {
+  const doc = {
+    proxies: [
+      { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'MIXED' },
+    ],
+    'proxy-groups': [{ name: 'MIXED', type: 'select', proxies: ['TUIC-1'], use: ['prov'] }],
+    'proxy-providers': { prov: { type: 'http', url: 'https://example.invalid/sub', override: { 'dialer-proxy': 'WG-A' } } },
+  };
+  const res = analyzeDialerGraph(doc);
+  assert.equal(res.cycles.length, 1, 'use:-edge of a mixed group participates');
+  assert.ok(res.cycles[0].route.includes('WG-A') && res.cycles[0].route.includes('MIXED'));
+});
+
+test('build gate also rejects the mixed-group provider-override cycle', () => {
+  const proxies = [
+    { name: 'TUIC-1', type: 'tuic', server: '203.0.113.40', port: 443, uuid: '00000000-0000-4000-8000-0000000000e1', password: 'p' },
+    { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': b64(1), 'public-key': b64(11), ip: '10.66.1.2', 'dialer-proxy': 'MIXED' },
+  ];
+  const groups = [{ name: 'MIXED', type: 'select', proxies: ['TUIC-1'], use: ['prov'] }];
+  const providers = { prov: { type: 'http', url: 'https://example.invalid/sub', override: { 'dialer-proxy': 'WG-A' } } };
+  assert.throws(() => buildMihomoYaml(proxies, groups, providers, [], [], opts), /circular dialer-proxy dependency/);
+});

@@ -245,25 +245,28 @@ function applyMihomoWgDialer(proxies, dialer) {
     return out;
 }
 
-// Full dialer dependency-graph cycle detection (WireGuard-over-WireGuard support).
-// A WireGuard outbound MAY dial through another WireGuard outbound (WARP-over-WARP)
-// and through groups containing them — a chain is valid as long as its handshake
-// route never returns to the starting outbound. Edges:
+// Full dialer dependency-graph model (WireGuard-over-WireGuard support).
+// The Mihomo config is treated as a directed graph; a chain is valid as long as
+// its handshake route never returns to the starting outbound. Vertices: proxies,
+// proxy-groups, proxy-providers, DIRECT/REJECT. Edges:
 //   proxy P --dialer-proxy--> T
-//   group G -> static members (proxies) and provider members (use)
-//   provider U -> U.override['dialer-proxy'] when configured; a provider without
-//     an override carries no dialer of its own, so it is a dead end (statically safe).
-// A route returning to its start is a real handshake deadlock. Mihomo's own static
-// validator walks direct dialer edges only and misses loops through group membership,
-// so this check fails closed. DIRECT/REJECT terminate a route.
-function detectMihomoDialerCycles(proxies, groups, providers) {
+//   group G -> static members (proxies) AND provider members (use) — a mixed
+//     group contributes both edge categories
+//   provider U -> U.override['dialer-proxy'] when configured
+// A provider WITHOUT an override adds no static edge: its remote node set is
+// unknown at config time, so the branch is dynamic/unknown — never claimed
+// cycle-free. The build gate only rejects PROVEN cycles (no false errors);
+// analyzeDialerGraph() surfaces the dynamic branches for warning semantics.
+// DIRECT/REJECT terminate a route.
+const MIHOMO_DIALER_DEAD_ENDS = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE']);
+
+function buildDialerDependencyGraph(proxies, groups, providers) {
     const dialerOf = new Map();
     (Array.isArray(proxies) ? proxies : []).forEach((p) => {
         if (p && typeof p === 'object' && typeof p.name === 'string' && p['dialer-proxy']) {
             dialerOf.set(p.name, String(p['dialer-proxy']));
         }
     });
-    if (dialerOf.size === 0) return;
     const staticMembers = new Map();
     const providerMembers = new Map();
     (Array.isArray(groups) ? groups : []).forEach((g) => {
@@ -279,36 +282,97 @@ function detectMihomoDialerCycles(proxies, groups, providers) {
             if (typeof dp === 'string' && dp.trim()) providerDialer.set(name, dp.trim());
         });
     }
-    const deadEnds = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE']);
-    const nextNodes = (node) => {
-        const out = [];
-        if (dialerOf.has(node)) out.push(dialerOf.get(node));
-        if (staticMembers.has(node)) out.push(...staticMembers.get(node).filter((m) => !deadEnds.has(m)));
-        else if (providerMembers.has(node)) {
-            for (const u of providerMembers.get(node)) {
-                if (providerDialer.has(u)) out.push(providerDialer.get(u));
-            }
+    return { dialerOf, staticMembers, providerMembers, providerDialer, deadEnds: MIHOMO_DIALER_DEAD_ENDS };
+}
+
+function nextDialerNodes(graph, node) {
+    const out = [];
+    if (graph.dialerOf.has(node)) out.push(graph.dialerOf.get(node));
+    // Mixed groups (proxies: AND use:) contribute BOTH edge categories; skipping
+    // use: edges because proxies: exists would hide provider-override cycles.
+    if (graph.staticMembers.has(node)) out.push(...graph.staticMembers.get(node).filter((m) => !graph.deadEnds.has(m)));
+    if (graph.providerMembers.has(node)) {
+        for (const u of graph.providerMembers.get(node)) {
+            if (graph.providerDialer.has(u)) out.push(graph.providerDialer.get(u));
         }
-        return out;
-    };
-    for (const start of dialerOf.keys()) {
+    }
+    return out;
+}
+
+// Returns every cycle reachable from a dialer-configured outbound back to itself,
+// as { start, route: [start, ..., start] }.
+function findDialerCycles(graph) {
+    const cycles = [];
+    for (const start of graph.dialerOf.keys()) {
         const path = [start];
         const visit = (node) => {
-            if (node === start) return true;
-            if (path.includes(node) || deadEnds.has(node)) return false;
+            if (node === start) {
+                cycles.push({ start, route: path.slice().concat(start) });
+                return true;
+            }
+            if (path.includes(node) || graph.deadEnds.has(node)) return false;
             path.push(node);
-            for (const n of nextNodes(node)) {
+            for (const n of nextDialerNodes(graph, node)) {
                 if (visit(n)) return true;
             }
             path.pop();
             return false;
         };
-        for (const n of nextNodes(start)) {
-            if (visit(n)) {
-                throw new Error(`Mihomo: circular dialer-proxy dependency for "${start}" (route: ${path.join(' -> ')}) — the handshake route returns to its own outbound`);
-            }
+        for (const n of nextDialerNodes(graph, start)) {
+            if (visit(n)) break;
         }
     }
+    return cycles;
+}
+
+// Build-time gate: a cycle is a real handshake deadlock, fail closed.
+function detectMihomoDialerCycles(proxies, groups, providers) {
+    const graph = buildDialerDependencyGraph(proxies, groups, providers);
+    if (graph.dialerOf.size === 0) return;
+    const cycles = findDialerCycles(graph);
+    if (cycles.length) {
+        const c = cycles[0];
+        throw new Error(`Mihomo: circular dialer-proxy dependency for "${c.start}" (route: ${c.route.join(' -> ')}) — the handshake route returns to its own outbound`);
+    }
+}
+
+// Public validator API: analyze a parsed final YAML document. Returns:
+//   cycles        — every dialer cycle found, each with the full readable route;
+//   dynamicGroups — groups reachable from a dialer route whose member set is
+//                   partially or fully provider-backed;
+//   dynamicProviders — providers referenced by those groups WITHOUT a static
+//                   override.dialer-proxy. Their remote node set is unknown at
+//                   config time: such branches are dynamic/unknown, NOT provably
+//                   cycle-free — callers must warn (never invent a verdict about
+//                   provider contents; runtime compatibility stays a field test).
+function analyzeDialerGraph(doc) {
+    const d = doc && typeof doc === 'object' && !Array.isArray(doc) ? doc : {};
+    const graph = buildDialerDependencyGraph(d.proxies, d['proxy-groups'], d['proxy-providers']);
+    const cycles = findDialerCycles(graph);
+    const dynamicGroups = [];
+    const dynamicProviders = [];
+    // Walk from every dialer-configured outbound; any group reachable via dialer
+    // edges that carries use: introduces an unknown remote branch. A provider with
+    // a static override is already an explicit edge; one without is unknown.
+    const dialerRoots = [...graph.dialerOf.values()];
+    const seen = new Set();
+    const visit = (node) => {
+        if (seen.has(node) || graph.deadEnds.has(node)) return;
+        seen.add(node);
+        if (graph.staticMembers.has(node)) {
+            graph.staticMembers.get(node).forEach(visit);
+        }
+        if (graph.providerMembers.has(node)) {
+            dynamicGroups.push(node);
+            for (const u of graph.providerMembers.get(node)) {
+                if (!graph.providerDialer.has(u) && !dynamicProviders.includes(u)) dynamicProviders.push(u);
+                if (graph.providerDialer.has(u)) visit(graph.providerDialer.get(u));
+            }
+        }
+    };
+    for (const root of dialerRoots) visit(root);
+    for (const start of graph.dialerOf.keys()) visit(start);
+    return { cycles, dynamicGroups: [...new Set(dynamicGroups)], dynamicProviders };
 }
 
 function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
@@ -437,4 +501,5 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
 
 export {
     buildMihomoYaml,
+    analyzeDialerGraph,
 };
