@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildFromRequest } from '../../src/build.js';
+import { buildMihomoYaml } from '../../src/core/yaml.js';
 import { parseWireGuardConf } from '../../src/core/wireguard.js';
 
 const opts = { addTun: false, addSocks: true, webUI: false, mihomoSubscriptionMode: false };
@@ -71,9 +72,18 @@ test('variant A: wireguard gets dialer-proxy referencing a link proxy', () => {
   assert.ok(!proxyBlock(yaml, 'VPS-DK').includes('dialer-proxy'), 'target proxy untouched');
 });
 
-test('variant A: dialer-proxy may reference a group name', () => {
-  const yaml = build(['vless://' + UUID + '@192.0.2.1:443#VPS-DK'], [WARP_CONF], { wgDialerProxy: 'GLOBAL' });
-  assert.ok(/dialer-proxy: GLOBAL/.test(yaml));
+test('variant A: auto-groups containing the WG proxy are rejected as a cycle', () => {
+  // GLOBAL contains WARP (directly and via the Fastest group) - the handshake
+  // route would return to its own outbound, so the graph detector rejects it.
+  assert.throws(() => build(['vless://' + UUID + '@192.0.2.1:443#VPS-DK'], [WARP_CONF], { wgDialerProxy: 'GLOBAL' }),
+    /circular dialer-proxy dependency for .WARP./);
+  // A group that does NOT contain the WG proxy stays a valid target.
+  const proxies = [
+    { name: 'VPS-DK', type: 'trojan', server: '203.0.113.1', port: 443, password: 'p' },
+    { name: 'WARP', type: 'wireguard', server: '162.159.198.2', port: 2408, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '172.16.0.2', 'dialer-proxy': 'HOP' },
+  ];
+  const yaml = buildMihomoYaml(proxies, [{ name: 'HOP', type: 'select', proxies: ['VPS-DK'] }, { name: 'GLOBAL', type: 'select', proxies: ['VPS-DK', 'WARP', 'REJECT'] }], null, ['MATCH,GLOBAL'], [], opts);
+  assert.ok(/dialer-proxy: HOP/.test(yaml));
 });
 
 test('variant A: unknown target is rejected', () => {
@@ -205,4 +215,97 @@ test('variant C: provider-backed group cannot contain the WG proxy (no loop by c
   // The only dialer user is the WG proxy itself; the group has no static proxies.
   const block = yaml.slice(yaml.indexOf('- name: WARP-DIALER'), yaml.indexOf('⚡ Fastest'));
   assert.ok(!/^s+- WARP$/m.test(block), 'WG name absent from provider group members');
+});
+
+// ---- WireGuard-over-WireGuard chains and the dependency-graph cycle detector ----
+
+const WG_A = WARP_CONF.replace('WARP', 'WG-A');
+const wgConf = (name, endpoint, ip) => WARP_CONF
+  .replace('AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=', Buffer.alloc(32, name.length + 1).toString('base64'))
+  .replace('AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=', Buffer.alloc(32, name.length + 41).toString('base64'))
+  .replace('172.16.0.2', ip)
+  .replace('162.159.198.2:2408', endpoint)
+  .replace(/name: x/, 'name: ' + name);
+
+test('variant A supports WG-over-WG: WARP-OUTER dials through WARP-INNER (valid chain)', () => {
+  const inner = wgConf('WARP-INNER', '192.0.2.65:51820', '10.66.1.2');
+  const outer = wgConf('WARP-OUTER', '162.159.198.2:2408', '172.16.0.2');
+  const yaml = build(['trojan://p@203.0.113.30:443#T30'], [{ conf: inner, name: 'WARP-INNER' }, { conf: outer, name: 'WARP-OUTER' }],
+    { wgDialerProxy: 'WARP-INNER' });
+  const outerBlock = proxyBlock(yaml, 'WARP-OUTER');
+  const innerBlock = proxyBlock(yaml, 'WARP-INNER');
+  assert.ok(/dialer-proxy: WARP-INNER/.test(outerBlock), 'outer dials via inner');
+  assert.ok(!innerBlock.includes('dialer-proxy'), 'inner (transit) dials directly');
+});
+
+test('3-node chain via manual per-proxy dialer fields is valid (no false rejection)', () => {
+  const proxies = [
+    { name: 'WG-C', type: 'wireguard', server: '192.0.2.71', port: 51820, 'private-key': Buffer.alloc(32, 3).toString('base64'), 'public-key': Buffer.alloc(32, 13).toString('base64'), ip: '10.66.3.2' },
+    { name: 'WG-B', type: 'wireguard', server: '192.0.2.72', port: 51820, 'private-key': Buffer.alloc(32, 2).toString('base64'), 'public-key': Buffer.alloc(32, 12).toString('base64'), ip: '10.66.2.2', 'dialer-proxy': 'WG-C' },
+    { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '10.66.1.2', 'dialer-proxy': 'WG-B' },
+  ];
+  const yaml = buildMihomoYaml(proxies, [{ name: 'GLOBAL', type: 'select', proxies: ['WG-A', 'WG-B', 'WG-C', 'REJECT'] }], null, ['MATCH,GLOBAL'], [], opts);
+  assert.ok(!/circular/.test(yaml));
+});
+
+test('group-mediated chain WG-A -> group -> WG-B -> WG-C is valid', () => {
+  const proxies = [
+    { name: 'WG-C', type: 'wireguard', server: '192.0.2.71', port: 51820, 'private-key': Buffer.alloc(32, 3).toString('base64'), 'public-key': Buffer.alloc(32, 13).toString('base64'), ip: '10.66.3.2' },
+    { name: 'WG-B', type: 'wireguard', server: '192.0.2.72', port: 51820, 'private-key': Buffer.alloc(32, 2).toString('base64'), 'public-key': Buffer.alloc(32, 12).toString('base64'), ip: '10.66.2.2', 'dialer-proxy': 'HOP-C' },
+    { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '10.66.1.2', 'dialer-proxy': 'HOP-B' },
+  ];
+  const groups = [
+    { name: 'HOP-C', type: 'select', proxies: ['WG-C'] },
+    { name: 'HOP-B', type: 'select', proxies: ['WG-B'] },
+    { name: 'GLOBAL', type: 'select', proxies: ['WG-A', 'REJECT'] },
+  ];
+  const yaml = buildMihomoYaml(proxies, groups, null, ['MATCH,GLOBAL'], [], opts);
+  assert.ok(yaml.includes('name: HOP-B'));
+});
+
+test('self-loop is rejected by the graph detector', () => {
+  const proxies = [{ name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '10.66.1.2', 'dialer-proxy': 'WG-A' }];
+  assert.throws(() => buildMihomoYaml(proxies, [], null, [], [], opts), /circular dialer-proxy dependency for "WG-(A|B)"/);
+});
+
+test('2-node loop WG-A -> WG-B -> WG-A is rejected', () => {
+  const proxies = [
+    { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '10.66.1.2', 'dialer-proxy': 'WG-B' },
+    { name: 'WG-B', type: 'wireguard', server: '192.0.2.72', port: 51820, 'private-key': Buffer.alloc(32, 2).toString('base64'), 'public-key': Buffer.alloc(32, 12).toString('base64'), ip: '10.66.2.2', 'dialer-proxy': 'WG-A' },
+  ];
+  assert.throws(() => buildMihomoYaml(proxies, [], null, [], [], opts), /circular dialer-proxy dependency for "WG-(A|B)"/);
+});
+
+test('loop through a static group (WG-A -> group -> WG-A) is rejected', () => {
+  const proxies = [{ name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '10.66.1.2', 'dialer-proxy': 'HOP' }];
+  const groups = [{ name: 'HOP', type: 'select', proxies: ['WG-A', 'DIRECT'] }];
+  assert.throws(() => buildMihomoYaml(proxies, groups, null, [], [], opts), /circular dialer-proxy dependency for "WG-(A|B)"/);
+});
+
+test('long loop through two groups is rejected', () => {
+  const proxies = [
+    { name: 'WG-B', type: 'wireguard', server: '192.0.2.72', port: 51820, 'private-key': Buffer.alloc(32, 2).toString('base64'), 'public-key': Buffer.alloc(32, 12).toString('base64'), ip: '10.66.2.2', 'dialer-proxy': 'GROUP-B' },
+    { name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '10.66.1.2', 'dialer-proxy': 'GROUP-A' },
+  ];
+  const groups = [
+    { name: 'GROUP-A', type: 'select', proxies: ['WG-B'] },
+    { name: 'GROUP-B', type: 'select', proxies: ['WG-A'] },
+  ];
+  assert.throws(() => buildMihomoYaml(proxies, groups, null, [], [], opts), /circular dialer-proxy dependency for "WG-(A|B)"/);
+});
+
+test('cycle through a provider with override.dialer-proxy is rejected; without override it is a dead end', () => {
+  const provider = { type: 'http', url: 'https://example.invalid/sub', override: { 'dialer-proxy': 'WG-A' } };
+  const proxies = [{ name: 'WG-A', type: 'wireguard', server: '192.0.2.73', port: 51820, 'private-key': Buffer.alloc(32, 1).toString('base64'), 'public-key': Buffer.alloc(32, 11).toString('base64'), ip: '10.66.1.2', 'dialer-proxy': 'P-GROUP' }];
+  const groups = [{ name: 'P-GROUP', type: 'select', use: ['prov'] }];
+  assert.throws(() => buildMihomoYaml(proxies, groups, { prov: provider }, [], [], opts), /circular dialer-proxy dependency for "WG-(A|B)"/);
+  const safeProvider = { type: 'http', url: 'https://example.invalid/sub' };
+  const yaml = buildMihomoYaml(proxies, groups, { prov: safeProvider }, ['MATCH,GLOBAL'], [], opts);
+  assert.ok(yaml.includes('P-GROUP'));
+});
+
+test('plain configs without dialer edges are unaffected by the detector', () => {
+  const yaml = build(['trojan://p@203.0.113.31:443#T31'], [WARP_CONF]);
+  assert.ok(yaml.includes('type: wireguard'));
+  assert.ok(!yaml.includes('dialer-proxy'));
 });

@@ -245,11 +245,78 @@ function applyMihomoWgDialer(proxies, dialer) {
     return out;
 }
 
+// Full dialer dependency-graph cycle detection (WireGuard-over-WireGuard support).
+// A WireGuard outbound MAY dial through another WireGuard outbound (WARP-over-WARP)
+// and through groups containing them — a chain is valid as long as its handshake
+// route never returns to the starting outbound. Edges:
+//   proxy P --dialer-proxy--> T
+//   group G -> static members (proxies) and provider members (use)
+//   provider U -> U.override['dialer-proxy'] when configured; a provider without
+//     an override carries no dialer of its own, so it is a dead end (statically safe).
+// A route returning to its start is a real handshake deadlock. Mihomo's own static
+// validator walks direct dialer edges only and misses loops through group membership,
+// so this check fails closed. DIRECT/REJECT terminate a route.
+function detectMihomoDialerCycles(proxies, groups, providers) {
+    const dialerOf = new Map();
+    (Array.isArray(proxies) ? proxies : []).forEach((p) => {
+        if (p && typeof p === 'object' && typeof p.name === 'string' && p['dialer-proxy']) {
+            dialerOf.set(p.name, String(p['dialer-proxy']));
+        }
+    });
+    if (dialerOf.size === 0) return;
+    const staticMembers = new Map();
+    const providerMembers = new Map();
+    (Array.isArray(groups) ? groups : []).forEach((g) => {
+        if (!g || typeof g !== 'object' || typeof g.name !== 'string') return;
+        if (Array.isArray(g.proxies)) staticMembers.set(g.name, g.proxies.filter((m) => typeof m === 'string'));
+        if (Array.isArray(g.use)) providerMembers.set(g.name, g.use.filter((m) => typeof m === 'string'));
+    });
+    const providerDialer = new Map();
+    if (providers && typeof providers === 'object' && !Array.isArray(providers)) {
+        Object.entries(providers).forEach(([name, provider]) => {
+            const override = provider && typeof provider === 'object' ? provider.override : undefined;
+            const dp = override && typeof override === 'object' ? override['dialer-proxy'] : undefined;
+            if (typeof dp === 'string' && dp.trim()) providerDialer.set(name, dp.trim());
+        });
+    }
+    const deadEnds = new Set(['DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE']);
+    const nextNodes = (node) => {
+        const out = [];
+        if (dialerOf.has(node)) out.push(dialerOf.get(node));
+        if (staticMembers.has(node)) out.push(...staticMembers.get(node).filter((m) => !deadEnds.has(m)));
+        else if (providerMembers.has(node)) {
+            for (const u of providerMembers.get(node)) {
+                if (providerDialer.has(u)) out.push(providerDialer.get(u));
+            }
+        }
+        return out;
+    };
+    for (const start of dialerOf.keys()) {
+        const path = [start];
+        const visit = (node) => {
+            if (node === start) return true;
+            if (path.includes(node) || deadEnds.has(node)) return false;
+            path.push(node);
+            for (const n of nextNodes(node)) {
+                if (visit(n)) return true;
+            }
+            path.pop();
+            return false;
+        };
+        for (const n of nextNodes(start)) {
+            if (visit(n)) {
+                throw new Error(`Mihomo: circular dialer-proxy dependency for "${start}" (route: ${path.join(' -> ')}) — the handshake route returns to its own outbound`);
+            }
+        }
+    }
+}
+
 function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
     opts = opts || {};
     const wgDialer = resolveMihomoWgDialer(proxies, groups, providers, opts);
     if (wgDialer && wgDialer.group) groups = [wgDialer.group, ...groups];
     if (wgDialer) proxies = applyMihomoWgDialer(proxies, wgDialer);
+    detectMihomoDialerCycles(proxies, groups, providers);
     const addSocks = opts.addSocks !== false;
     const webUI = opts.webUI === true;
     const tunOpt = opts.tun;
