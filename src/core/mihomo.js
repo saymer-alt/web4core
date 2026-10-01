@@ -101,6 +101,177 @@ function assignSafeProxyNames(proxies, reservedNames = []) {
     return proxies;
 }
 
+// === Domain Policy Routing (DPR, Variant B) ===
+// User policies [{name, domains}] become inline classical rule-providers +
+// category proxy-groups + RULE-SET rules. Rules reference stable policy GROUPS;
+// groups reach the subscription nodes via use: on the provider — so the paid
+// provider may add/rename/remove servers freely and the rules never need
+// regeneration (contract live-verified on mihomo v1.19.31/v1.19.32, PoC 2026-10-01).
+// Nesting contract (issue #2588): url-test AUTO groups are only ever referenced
+// from select groups, never placed inside fallback.
+const DOMAIN_POLICY_RESERVED_NAMES = new Set([
+    GLOBAL_GROUP_NAME,
+    FASTEST_GROUP_NAME,
+    STATIC_HEALTH_GROUP_NAME,
+    'DIRECT',
+    'REJECT',
+    'REJECT-DROP',
+    'PASS',
+    'COMPATIBLE',
+]);
+const DOMAIN_POLICY_RULE_TYPES = new Set(['DOMAIN', 'DOMAIN-SUFFIX', 'DOMAIN-KEYWORD', 'DOMAIN-WILDCARD', 'DOMAIN-REGEX', 'GEOSITE', 'IP-CIDR', 'IP-CIDR6']);
+const DOMAIN_POLICY_HOSTNAME_RE = /^(\*\.)?(?:[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?\.?$/i;
+const DOMAIN_IPV4_CIDR_RE = /^(?:\d{1,3}\.){3}\d{1,3}$/;
+
+function normalizeDomainPolicyCidr(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const slash = raw.indexOf('/');
+    const addr = (slash === -1 ? raw : raw.slice(0, slash)).trim().toLowerCase();
+    const prefixRaw = slash === -1 ? '' : raw.slice(slash + 1).trim();
+    const prefix = prefixRaw === '' ? undefined : Number(prefixRaw);
+    if (prefix !== undefined && (!Number.isInteger(prefix) || prefix < 0)) return '';
+    if (DOMAIN_IPV4_CIDR_RE.test(addr)) {
+        const octets = addr.split('.').map(Number);
+        if (octets.some(o => o > 255)) return '';
+        if (prefix !== undefined && prefix > 32) return '';
+        return `${addr}/${prefix === undefined ? 32 : prefix}`;
+    }
+    if (addr.includes(':') && /^[0-9a-f:]+$/i.test(addr) && (addr.match(/::/g) || []).length <= 1) {
+        if (prefix !== undefined && prefix > 128) return '';
+        return `${addr}/${prefix === undefined ? 128 : prefix}`;
+    }
+    return '';
+}
+
+function parseDomainPolicyLine(raw) {
+    const line = String(raw || '').trim();
+    if (!line || line.startsWith('#')) return { skip: true };
+    const comma = line.indexOf(',');
+    if (comma !== -1) {
+        const type = line.slice(0, comma).trim().toUpperCase();
+        const value = line.slice(comma + 1).trim();
+        if (DOMAIN_POLICY_RULE_TYPES.has(type)) {
+            if (type === 'IP-CIDR' || type === 'IP-CIDR6') {
+                const cidr = normalizeDomainPolicyCidr(value);
+                if (!cidr) return { invalid: line };
+                return { rule: `IP-CIDR,${cidr},no-resolve` };
+            }
+            if (type === 'GEOSITE') {
+                if (!/^[a-z0-9!@._-]+$/i.test(value)) return { invalid: line };
+                return { rule: `GEOSITE,${value}` };
+            }
+            if (type === 'DOMAIN-KEYWORD' || type === 'DOMAIN-REGEX') {
+                // keywords/regex are not hostnames: accept any sane charset
+                if (!value || !/^[a-z0-9._*?+|^$()\[\]{}\\-]+$/i.test(value)) return { invalid: line };
+                return { rule: `${type},${value}` };
+            }
+            if (!value || !DOMAIN_POLICY_HOSTNAME_RE.test(value)) return { invalid: line };
+            return { rule: `${type},${value.toLowerCase()}` };
+        }
+        return { invalid: line };
+    }
+    const cidr = normalizeDomainPolicyCidr(line);
+    if (cidr) return { rule: `IP-CIDR,${cidr},no-resolve` };
+    if (!DOMAIN_POLICY_HOSTNAME_RE.test(line)) return { invalid: line };
+    return { rule: `DOMAIN-SUFFIX,${line.toLowerCase().replace(/^\*\./, '')}` };
+}
+
+function domainPolicySlug(name, index, used) {
+    let base = String(name).trim().toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 32);
+    if (!base) base = `n${index + 1}`;
+    let slug = `policy-${base}`;
+    let i = 2;
+    while (used.has(slug)) slug = `policy-${base}-${i++}`;
+    used.add(slug);
+    return slug;
+}
+
+function buildDomainPolicyArtifacts(policies, ctx) {
+    const warnings = [];
+    const ruleProviders = {};
+    const groups = [];
+    const rules = [];
+    const usedSlugs = new Set();
+    const existingGroups = new Set(ctx.existingGroupNames || []);
+    policies.forEach((policy, index) => {
+        const name = String(policy?.name || '').trim();
+        if (DOMAIN_POLICY_RESERVED_NAMES.has(name)) {
+            throw new Error(`Mihomo: domain policy name "${name}" is reserved`);
+        }
+        if (existingGroups.has(name)) {
+            throw new Error(`Mihomo: domain policy name "${name}" conflicts with an existing group`);
+        }
+        const lines = Array.isArray(policy.domains) ? policy.domains : String(policy.domains || '').split(/\r?\n/);
+        const seen = new Set();
+        const payload = [];
+        lines.forEach((raw) => {
+            const parsed = parseDomainPolicyLine(raw);
+            if (parsed.skip) return;
+            if (parsed.invalid) {
+                warnings.push(`Политика «${name}»: строка «${parsed.invalid}» не распознана и пропущена`);
+                return;
+            }
+            if (!seen.has(parsed.rule)) {
+                seen.add(parsed.rule);
+                payload.push(parsed.rule);
+            }
+        });
+        if (!payload.length) {
+            warnings.push(`Политика «${name}»: нет ни одного корректного домена — политика пропущена`);
+            return;
+        }
+        const slug = domainPolicySlug(name, index, usedSlugs);
+        ruleProviders[slug] = { type: 'inline', behavior: 'classical', format: 'yaml', payload };
+        rules.push(`RULE-SET,${slug},${name}`);
+        if (ctx.mode === 'subscription') {
+            groups.push({
+                name: `${name}-AUTO`,
+                type: 'url-test',
+                use: ctx.providerNames.slice(),
+                url: ctx.urlTest,
+                interval: PROXY_FETCH_INTERVAL,
+                tolerance: 50,
+                'expected-status': ctx.urlTestExpectedStatus,
+                'empty-fallback': 'REJECT'
+            });
+            groups.push({
+                name,
+                type: 'select',
+                proxies: [`${name}-AUTO`, FASTEST_GROUP_NAME, GLOBAL_GROUP_NAME, 'DIRECT']
+            });
+            existingGroups.add(`${name}-AUTO`);
+        } else if (ctx.mode === 'static') {
+            groups.push({
+                name,
+                type: 'select',
+                proxies: [FASTEST_GROUP_NAME, GLOBAL_GROUP_NAME, 'DIRECT']
+            });
+        } else {
+            // AUTO-WHITELIST priority mode: the allowed chain is
+            // RULE-SET → policy select → GLOBAL → existing flat fallback.
+            groups.push({
+                name,
+                type: 'select',
+                proxies: [GLOBAL_GROUP_NAME, 'DIRECT']
+            });
+        }
+        existingGroups.add(name);
+    });
+    return { ruleProviders, groups, rules, warnings };
+}
+
+function getDomainPolicyPolicies(opts) {
+    const policies = (opts && Array.isArray(opts.domainPolicy)) ? opts.domainPolicy : [];
+    if (policies.length && isPerProxyListenerMode(opts)) {
+        throw new Error('Mihomo: domain policy routing does not support per-proxy listeners');
+    }
+    return policies;
+}
+
 function buildMihomoProxy(bean) {
     const s = bean.stream || {};
     const base = { name: bean.name || computeTag(bean, new Set()), type: '', server: bean.host, port: bean.port };
@@ -635,6 +806,7 @@ function deduplicateProxies(beans) {
 function buildMihomoConfig(beans, opts) {
     const urlTest = getUrlTest(opts);
     const urlTestExpectedStatus = getUrlTestExpectedStatus(opts);
+    const policies = getDomainPolicyPolicies(opts);
     const dedupedBeans = deduplicateProxies(beans);
     const proxies = dedupedBeans.map(b => buildMihomoProxy(b));
     const usePerProxyListeners = isPerProxyListenerMode(opts);
@@ -701,7 +873,17 @@ function buildMihomoConfig(beans, opts) {
             });
         }
     }
-    
+
+    // DPR static mode: category groups are plain selects over the existing
+    // Fastest/GLOBAL chain — no provider-backed AUTO groups without providers.
+    const policyArtifacts = policies.length ? buildDomainPolicyArtifacts(policies, {
+        mode: 'static',
+        existingGroupNames: groups.map(g => g.name),
+        urlTest,
+        urlTestExpectedStatus
+    }) : null;
+    if (policyArtifacts) groups.push(...policyArtifacts.groups);
+
     const basePort = (opts && opts.basePort) || 7890;
     const listeners = [];
     if (addSocks && usePerProxyPort && proxies.length > 0) {
@@ -722,8 +904,12 @@ function buildMihomoConfig(beans, opts) {
         'log-level': 'warning',
         proxies,
         'proxy-groups': groups,
-        rules: [`MATCH,${GLOBAL_GROUP_NAME}`]
+        rules: [...(policyArtifacts ? policyArtifacts.rules : []), `MATCH,${GLOBAL_GROUP_NAME}`]
     };
+    if (policyArtifacts) {
+        config['rule-providers'] = policyArtifacts.ruleProviders;
+        config.warnings = policyArtifacts.warnings;
+    }
     if (addSocks && !usePerProxyPort) {
         config['mixed-port'] = basePort;
     } else if (listeners.length > 0) {
@@ -735,6 +921,7 @@ function buildMihomoConfig(beans, opts) {
 function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
     const urlTest = getUrlTest(opts);
     const urlTestExpectedStatus = getUrlTestExpectedStatus(opts);
+    const policies = getDomainPolicyPolicies(opts);
     if (!Array.isArray(subscriptionUrls) || subscriptionUrls.length === 0) {
         throw new Error('At least one subscription URL is required');
     }
@@ -858,6 +1045,7 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         });
     }
 
+    let subscriptionPolicyArtifacts = null;
     if (usePerProxyListeners) {
         if (extraProxies.length > 0) {
             groups.push({
@@ -885,6 +1073,20 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         const fastestTargets = fastestGroup && Array.isArray(fastestGroup.proxies)
             ? [...fastestGroup.proxies]
             : [];
+        // DPR subscription mode: AUTO url-test groups share the SAME providers
+        // as Fastest (use: is a reference, not a move — PoC-verified); category
+        // selects sit above them, GLOBAL stays the last DEFAULT target.
+        const policyArtifacts = policies.length ? buildDomainPolicyArtifacts(policies, {
+            mode: 'subscription',
+            providerNames,
+            urlTest,
+            urlTestExpectedStatus,
+            existingGroupNames: groups.map(g => g.name)
+        }) : null;
+        if (policyArtifacts) {
+            groups.push(...policyArtifacts.groups);
+            subscriptionPolicyArtifacts = policyArtifacts;
+        }
         groups.push({
             name: GLOBAL_GROUP_NAME,
             type: 'select',
@@ -912,8 +1114,18 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         });
     }
 
-    const rules = [`MATCH,${GLOBAL_GROUP_NAME}`];
-    return { providers, groups, rules, proxies: extraProxies, listeners };
+    const rules = [
+        ...(subscriptionPolicyArtifacts ? subscriptionPolicyArtifacts.rules : []),
+        `MATCH,${GLOBAL_GROUP_NAME}`
+    ];
+    return {
+        providers,
+        groups,
+        rules,
+        proxies: extraProxies,
+        listeners,
+        ...(subscriptionPolicyArtifacts ? { ruleProviders: subscriptionPolicyArtifacts.ruleProviders, warnings: subscriptionPolicyArtifacts.warnings } : {})
+    };
 }
 
 // Two independent priority tiers. Reuse proxy/provider builders; no domain-specific policy.
@@ -961,7 +1173,23 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
         ...probe, 'empty-fallback': 'REJECT',
         timeout: FALLBACK_DIAL_FAILURE_WINDOW_MS,
         'max-failed-times': FALLBACK_MAX_DIAL_FAILURES }];
-    return { proxies, providers, groups, rules: [`MATCH,${GLOBAL_GROUP_NAME}`] };
+    // DPR in priority mode stays deliberately flat: policy selects point at the
+    // existing GLOBAL fallback (RULE-SET → policy select → GLOBAL → flat P/F),
+    // never at category AUTO groups inside the fallback (#2588 contract).
+    const policies = getDomainPolicyPolicies(opts);
+    const policyArtifacts = policies.length ? buildDomainPolicyArtifacts(policies, {
+        mode: 'priority',
+        existingGroupNames: groups.map(g => g.name),
+        urlTest: probe.url
+    }) : null;
+    if (policyArtifacts) groups.push(...policyArtifacts.groups);
+    return {
+        proxies,
+        providers,
+        groups,
+        rules: [...(policyArtifacts ? policyArtifacts.rules : []), `MATCH,${GLOBAL_GROUP_NAME}`],
+        ...(policyArtifacts ? { ruleProviders: policyArtifacts.ruleProviders, warnings: policyArtifacts.warnings } : {})
+    };
 }
 
 export {

@@ -96,7 +96,7 @@ function upsertSection(lines, key, sectionYaml) {
     }
 }
 
-function overlayMihomoYaml(baseYamlText, proxies, groups, providers, rules, listeners) {
+function overlayMihomoYaml(baseYamlText, proxies, groups, providers, rules, listeners, ruleProviders) {
     const text = (baseYamlText || '').replace(/\r\n/g, '\n');
     const lines = text.split('\n');
 
@@ -110,6 +110,12 @@ function overlayMihomoYaml(baseYamlText, proxies, groups, providers, rules, list
 
     if (providers && typeof providers === 'object' && Object.keys(providers).length > 0) {
         upsertSection(lines, 'proxy-providers', providers);
+    }
+
+    // Inline domain-policy rule sets land between proxy-providers and rules;
+    // absent/empty keeps the legacy section order byte-for-byte.
+    if (ruleProviders && typeof ruleProviders === 'object' && Object.keys(ruleProviders).length > 0) {
+        upsertSection(lines, 'rule-providers', ruleProviders);
     }
 
     if (Array.isArray(rules) && rules.length > 0) {
@@ -496,7 +502,7 @@ function buildMihomoYaml(proxies, groups, providers, rules, listeners, opts) {
             template = lines.join('\n');
         }
     }
-    return overlayMihomoYaml(template, proxies, groups, providers, rules, listeners);
+    return overlayMihomoYaml(template, proxies, groups, providers, rules, listeners, opts.ruleProviders);
 }
 
 export {

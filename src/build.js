@@ -126,6 +126,32 @@ function applyRealityModernHosts(beans, modernHosts) {
   }
 }
 
+// Domain Policy Routing policies: [{name, domains}] where domains is the raw
+// user textarea (string) or an array of lines. Structural validation happens
+// here (empty/duplicate/comma names); per-line parsing and reserved/group-name
+// conflicts belong to the engine (core/mihomo.js), which reports skipped lines
+// as non-blocking warnings instead of failing the build.
+function normalizeDomainPolicy(raw) {
+  if (raw === undefined || raw === null || raw === '') return [];
+  if (!Array.isArray(raw)) throw new Error('Mihomo: domain policy must be an array of {name, domains}');
+  const out = [];
+  const seen = new Set();
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') throw new Error('Mihomo: domain policy entry must be an object');
+    const name = String(item.name || '').trim();
+    if (!name) throw new Error('Mihomo: domain policy name must not be empty');
+    if (name.includes(',')) throw new Error(`Mihomo: domain policy name must not contain commas: "${name}"`);
+    if (name.length > 64) throw new Error(`Mihomo: domain policy name is too long: "${name.slice(0, 32)}…"`);
+    if (seen.has(name)) throw new Error(`Mihomo: duplicate domain policy name: "${name}"`);
+    seen.add(name);
+    const domains = typeof item.domains === 'string'
+      ? item.domains.split(/\r?\n/)
+      : Array.isArray(item.domains) ? item.domains.map((s) => String(s)) : [];
+    out.push({ name, domains });
+  }
+  return out;
+}
+
 export function buildFromRequest(req) {
   const core = String(req?.core || '').toLowerCase();
   const input = String(req?.input || '');
@@ -145,6 +171,9 @@ export function buildFromRequest(req) {
   // keeps the legacy output byte-for-byte.
   const modernHosts = normalizeRealityModernHosts(options.mihomoRealityModernHosts);
   options.modernHosts = modernHosts;
+  // Domain Policy Routing (opt-in): absent/empty keeps every builder path
+  // byte-for-byte identical to the previous output.
+  options.domainPolicy = normalizeDomainPolicy(options.mihomoDomainPolicy);
 
   if (!core) throw new Error('Missing core');
   if (core !== 'singbox' && core !== 'xray' && core !== 'mihomo') throw new Error('Invalid core: ' + core);
@@ -181,14 +210,16 @@ export function buildFromRequest(req) {
     applyRealityModernHosts(primarySide.beans, modernHosts);
     applyRealityModernHosts(fallbackSide.beans, modernHosts);
     const cfg = buildMihomoPriorityConfig(primarySide, fallbackSide, options);
-    return { kind: 'yaml', data: buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, [], {
+    const yaml = buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, [], {
       addSocks: !!options.addSocks, webUI: !!options.webUI,
       webUiUrl: options.webUiUrl,
       wgDialerProxy: options.wgDialerProxy,
       wgDialerGroupMembers: options.wgDialerGroupMembers,
       wgDialerProviders: options.wgDialerProviders,
       tun: options.addTun ? { mode: 'tun', stack: options.mihomoTunStack } : null,
-    }) };
+      ruleProviders: cfg.ruleProviders,
+    });
+    return { kind: 'yaml', data: yaml, warnings: cfg.warnings };
   }
 
   const beans = input.trim() ? buildBeansFromInput(input.trim()) : [];
@@ -292,7 +323,7 @@ export function buildFromRequest(req) {
     assertCoreSupports(extraBeans, core, 'Mihomo', options);
     applyRealityModernHosts(extraBeans, modernHosts);
 
-    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter, modernHosts, deviceModel: options.deviceModel});
+    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter, modernHosts, deviceModel: options.deviceModel, domainPolicy: options.domainPolicy});
     const yaml = buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, cfg.listeners, {
       addSocks,
       webUI,
@@ -301,12 +332,13 @@ export function buildFromRequest(req) {
       wgDialerGroupMembers: options.wgDialerGroupMembers,
       wgDialerProviders: options.wgDialerProviders,
       tun: mihomoTunOpts,
+      ruleProviders: cfg.ruleProviders,
     });
-    return { kind: 'yaml', data: yaml };
+    return { kind: 'yaml', data: yaml, warnings: cfg.warnings };
   }
 
   const outBeans = allBeans.filter((b) => b.proto !== 'sdns');
-  const cfg = buildMihomoConfig(outBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest});
+  const cfg = buildMihomoConfig(outBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, domainPolicy: options.domainPolicy});
   const yaml = buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, {
     addSocks,
     webUI,
@@ -315,8 +347,9 @@ export function buildFromRequest(req) {
     wgDialerGroupMembers: options.wgDialerGroupMembers,
     wgDialerProviders: options.wgDialerProviders,
     tun: mihomoTunOpts,
+    ruleProviders: cfg['rule-providers'],
   });
-  return { kind: 'yaml', data: yaml };
+  return { kind: 'yaml', data: yaml, warnings: cfg.warnings };
 }
 
 
