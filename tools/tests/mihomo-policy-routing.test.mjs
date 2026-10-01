@@ -237,3 +237,44 @@ test('DPR × AUTO-WHITELIST via public API: YAML keeps the flat fallback and add
     assert.ok(result.data.includes('  - "RULE-SET,policy-ai,AI"'));
     assert.ok(!result.data.includes('AI-AUTO'));
 });
+
+// === DPR × ⚡ Fastest existence (single-static regression) ===
+
+const UUID = '00000000-0000-4000-8000-000000000001';
+
+test('DPR static + single static proxy: category select must not reference missing ⚡ Fastest', () => {
+    const cfg = buildMihomoConfig([], { domainPolicy: policies });
+    assert.ok(!cfg['proxy-groups'].some(g => g.name === '⚡ Fastest'), 'single static: no Fastest group emitted');
+    const ai = cfg['proxy-groups'].find(g => g.name === 'AI');
+    assert.deepEqual(ai.proxies, ['GLOBAL', 'DIRECT']);
+});
+
+test('DPR static + two static proxies: category select references existing ⚡ Fastest', () => {
+    const beans = buildBeansFromInput([
+        'vless://' + UUID + '@192.0.2.1:443#A',
+        'vless://' + UUID + '@192.0.2.2:443#B',
+    ].join('\n'));
+    const cfg = buildMihomoConfig(beans, { domainPolicy: policies });
+    assert.ok(cfg['proxy-groups'].some(g => g.name === '⚡ Fastest'), 'two statics: Fastest group emitted');
+    const ai = cfg['proxy-groups'].find(g => g.name === 'AI');
+    assert.deepEqual(ai.proxies, ['⚡ Fastest', 'GLOBAL', 'DIRECT']);
+});
+
+test('DPR subscription mode: category select keeps ⚡ Fastest (providers imply the group)', () => {
+    const cfg = buildMihomoSubscriptionConfig(subUrls, [], { domainPolicy: policies });
+    assert.ok(cfg.groups.some(g => g.name === '⚡ Fastest'));
+    const ai = cfg.groups.find(g => g.name === 'AI');
+    assert.equal(ai.proxies[0], 'AI-AUTO');
+    assert.ok(ai.proxies.includes('⚡ Fastest'));
+});
+
+test('DPR static single proxy end-to-end: generated YAML has no dangling Fastest reference', () => {
+    const yaml = buildFromRequest({
+        core: 'mihomo',
+        input: 'vless://' + UUID + '@192.0.2.1:443#A',
+        wgBeans: [],
+        options: { addTun: false, addSocks: true, webUI: false, mihomoSubscriptionMode: false, domainPolicy: policies },
+    }).data;
+    const fastestRefs = (yaml.match(/⚡ Fastest/g) || []).length;
+    assert.equal(fastestRefs, 0, 'no ⚡ Fastest anywhere in single-static DPR output');
+});

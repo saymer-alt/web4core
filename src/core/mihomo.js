@@ -241,14 +241,17 @@ function buildDomainPolicyArtifacts(policies, ctx) {
             groups.push({
                 name,
                 type: 'select',
-                proxies: [`${name}-AUTO`, FASTEST_GROUP_NAME, GLOBAL_GROUP_NAME, 'DIRECT']
+                // ⚡ Fastest is referenced only when it is actually emitted
+                // (a single-static config emits no Fastest group; referencing
+                // it would produce a dangling group target).
+                proxies: [`${name}-AUTO`, ...(existingGroups.has(FASTEST_GROUP_NAME) ? [FASTEST_GROUP_NAME] : []), GLOBAL_GROUP_NAME, 'DIRECT']
             });
             existingGroups.add(`${name}-AUTO`);
         } else if (ctx.mode === 'static') {
             groups.push({
                 name,
                 type: 'select',
-                proxies: [FASTEST_GROUP_NAME, GLOBAL_GROUP_NAME, 'DIRECT']
+                proxies: [...(existingGroups.has(FASTEST_GROUP_NAME) ? [FASTEST_GROUP_NAME] : []), GLOBAL_GROUP_NAME, 'DIRECT']
             });
         } else {
             // AUTO-WHITELIST priority mode: the allowed chain is
@@ -670,6 +673,9 @@ function buildMihomoProxy(bean) {
         if (Number.isFinite(wg.mtu)) p.mtu = wg.mtu;
         if (Number.isFinite(wg.persistentKeepalive) && wg.persistentKeepalive > 0) p['persistent-keepalive'] = wg.persistentKeepalive;
         if (wg.reserved !== undefined) p.reserved = wg.reserved;
+        // Per-profile dialer assignment (consumer sets it from the profile's
+        // connection mode). Global wgDialerProxy stamping never overwrites it.
+        if (typeof wg.dialerProxy === 'string' && wg.dialerProxy.trim()) p['dialer-proxy'] = wg.dialerProxy.trim();
         if (hasPeers) p.peers = peers.map(mapPeer).filter(Boolean);
         if (wg.ipStack && typeof wg.ipStack === 'object' && Object.keys(wg.ipStack).length) p['ip-stack'] = wg.ipStack;
         if (wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object') {
