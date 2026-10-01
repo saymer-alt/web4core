@@ -184,13 +184,24 @@ const MIHOMO_WG_DIALER_DEFAULT_GROUP = 'WARP-DIALER';
 // selects itself would loop at dial time — a cycle Mihomo's static validator
 // does not catch. A provider-backed group can never contain the WG proxy
 // itself, because providers are separate from static proxies.
+//
+// opts.wgDialerGroupOnly — per-profile assignment mode: build the dialer group
+// (same validation/construction) but do NOT stamp any proxy globally. The
+// consumer assigns `dialer-proxy` per profile via the bean-level field
+// `wireguard.dialerProxy` (see buildMihomoProxy); proxies that already carry an
+// explicit `dialer-proxy` are never re-stamped by the global pass.
 function resolveMihomoWgDialer(proxies, groups, providers, opts) {
+    const groupOnly = !!(opts && opts.wgDialerGroupOnly);
     const target = String((opts && opts.wgDialerProxy) || '').trim();
     const membersRaw = (opts && Array.isArray(opts.wgDialerGroupMembers)) ? opts.wgDialerGroupMembers : [];
     const members = membersRaw.map((s) => String(s).trim()).filter(Boolean);
     const providersRaw = (opts && Array.isArray(opts.wgDialerProviders)) ? opts.wgDialerProviders : [];
     const providerUrls = providersRaw.map((s) => String(s).trim()).filter(Boolean);
     if (!target && members.length === 0 && providerUrls.length === 0) return null;
+    if (groupOnly && members.length === 0 && providerUrls.length === 0) {
+        // Nothing to construct: the target reference itself lives on the bean.
+        return null;
+    }
     const proxyList = Array.isArray(proxies) ? proxies : [];
     const groupList = Array.isArray(groups) ? groups : [];
     const proxyNames = new Set(proxyList.map((p) => String((p && p.name) || '')));
@@ -226,26 +237,35 @@ function resolveMihomoWgDialer(proxies, groups, providers, opts) {
         const group = { name: groupName, type: 'select' };
         if (members.length) group.proxies = members.slice();
         if (providerNames.length) group.use = providerNames;
-        return { target: groupName, members: new Set(members), group };
+        return { target: groupName, members: new Set(members), group, stampAll: !groupOnly };
     }
     // Variant A: the target must exist (mirrors mihomo config validation).
     if (target !== 'DIRECT' && !proxyNames.has(target) && !groupNames.has(target)) {
         throw new Error(`Mihomo: dialer-proxy target "${target}" not found among proxies or groups`);
     }
-    return { target, members: new Set(), group: null };
+    return { target, members: new Set(), group: null, stampAll: !groupOnly };
 }
 
 function applyMihomoWgDialer(proxies, dialer) {
-    if (!dialer) return proxies;
+    if (!dialer || dialer.stampAll === false) return proxies;
     let applied = 0;
+    let explicit = 0;
     const out = (Array.isArray(proxies) ? proxies : []).map((p) => {
-        if (p && p.type === 'wireguard' && p.name !== dialer.target && !dialer.members.has(String(p.name || ''))) {
-            applied++;
-            return Object.assign({}, p, { 'dialer-proxy': dialer.target });
+        if (p && p.type === 'wireguard') {
+            // Bean-level (per-profile) assignment wins: never overwrite an
+            // explicit dialer-proxy with the global target.
+            if (p['dialer-proxy']) {
+                explicit++;
+                return p;
+            }
+            if (p.name !== dialer.target && !dialer.members.has(String(p.name || ''))) {
+                applied++;
+                return Object.assign({}, p, { 'dialer-proxy': dialer.target });
+            }
         }
         return p;
     });
-    if (applied === 0) {
+    if (applied === 0 && explicit === 0) {
         throw new Error(`Mihomo: dialer-proxy "${dialer.target}" applies to no wireguard proxy (self-named and member profiles are excluded)`);
     }
     return out;

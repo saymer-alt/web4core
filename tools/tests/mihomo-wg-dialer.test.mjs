@@ -453,3 +453,85 @@ test('build gate also rejects the mixed-group provider-override cycle', () => {
   const providers = { prov: { type: 'http', url: 'https://example.invalid/sub', override: { 'dialer-proxy': 'WG-A' } } };
   assert.throws(() => buildMihomoYaml(proxies, groups, providers, [], [], opts), /circular dialer-proxy dependency/);
 });
+
+// === Per-profile (bean-level) dialer assignment ===
+
+// helper: bean with explicit wireguard.dialerProxy
+function beanWithDialer(conf, name, target) {
+  const bean = parseWireGuardConf(conf, name);
+  if (target !== undefined) bean.wireguard.dialerProxy = target;
+  return bean;
+}
+
+test('bean-level dialerProxy: wireguard gets dialer-proxy from the bean field', () => {
+  const beans = [beanWithDialer(WARP_CONF, 'WARP-SE', 'VPS-DK')];
+  const yaml = buildFromRequest({ core: 'mihomo', input: ['vless://' + UUID + '@192.0.2.1:443#VPS-DK'].join('\n'), wgBeans: beans, options: opts }).data;
+  const block = proxyBlock(yaml, 'WARP-SE');
+  assert.match(block, /dialer-proxy: VPS-DK/);
+});
+
+test('bean-level dialerProxy: whitespace-only value is ignored (no key, no error)', () => {
+  const beans = [beanWithDialer(WARP_CONF, 'WARP-SE', '   ')];
+  const yaml = buildFromRequest({ core: 'mihomo', input: ['vless://' + UUID + '@192.0.2.1:443#VPS-DK'].join('\n'), wgBeans: beans, options: opts }).data;
+  assert.ok(!yaml.includes('dialer-proxy'));
+});
+
+test('mixed profiles: only the assigned profile is dialed, direct profile untouched', () => {
+  const beans = [
+    parseWireGuardConf(SE2_CONF, 'HOME'),
+    beanWithDialer(WARP_CONF, 'WARP-SE', 'VPS-DK'),
+  ];
+  const yaml = buildFromRequest({ core: 'mihomo', input: [], wgBeans: beans, options: opts }).data;
+  assert.ok(!proxyBlock(yaml, 'HOME').includes('dialer-proxy'), 'direct profile has no dialer-proxy');
+  assert.match(proxyBlock(yaml, 'WARP-SE'), /dialer-proxy: VPS-DK/);
+});
+
+test('explicit bean assignment wins over global wgDialerProxy stamping', () => {
+  const beans = [
+    parseWireGuardConf(SE2_CONF, 'HOME'),
+    beanWithDialer(WARP_CONF, 'WARP-SE', 'VPS-EE'),
+  ];
+  const input = ['vless://' + UUID + '@192.0.2.1:443#VPS-DK', 'vless://' + UUID + '@192.0.2.2:443#VPS-EE'].join('\n');
+  const yaml = buildFromRequest({
+    core: 'mihomo', input: input, wgBeans: beans,
+    options: Object.assign({}, opts, { wgDialerProxy: 'VPS-DK' }),
+  }).data;
+  assert.match(proxyBlock(yaml, 'HOME'), /dialer-proxy: VPS-DK/, 'unassigned profile stamped by global target');
+  assert.match(proxyBlock(yaml, 'WARP-SE'), /dialer-proxy: VPS-EE/, 'explicit assignment not overwritten by global target');
+});
+
+test('wgDialerGroupOnly: dialer group built, no global stamping', () => {
+  const beans = [
+    parseWireGuardConf(SE2_CONF, 'HOME'),
+    beanWithDialer(WARP_CONF, 'WARP-SE', 'WARP-DIALER'),
+  ];
+  const yaml = buildFromRequest({
+    core: 'mihomo', input: [], wgBeans: beans,
+    options: Object.assign({}, opts, { wgDialerGroupMembers: ['HOME'], wgDialerGroupOnly: true }),
+  }).data;
+  const groupBlock = yaml.match(/  - name: WARP-DIALER[\s\S]*?(?=  - name: |proxy-groups:)/);
+  assert.ok(groupBlock, 'WARP-DIALER group built');
+  assert.match(groupBlock[0], /type: select/);
+  assert.match(groupBlock[0], /- HOME/);
+  assert.ok(!proxyBlock(yaml, 'HOME').includes('dialer-proxy'), 'no global stamping');
+  assert.match(proxyBlock(yaml, 'WARP-SE'), /dialer-proxy: WARP-DIALER/, 'bean assignment intact');
+});
+
+test('wgDialerGroupOnly without members/providers: nothing built, no error', () => {
+  const beans = [beanWithDialer(WARP_CONF, 'WARP-SE', 'VPS-DK')];
+  const yaml = buildFromRequest({
+    core: 'mihomo', input: ['vless://' + UUID + '@192.0.2.1:443#VPS-DK'], wgBeans: beans,
+    options: Object.assign({}, opts, { wgDialerGroupOnly: true }),
+  }).data;
+  assert.ok(!yaml.includes('WARP-DIALER'));
+  assert.match(proxyBlock(yaml, 'WARP-SE'), /dialer-proxy: VPS-DK/);
+});
+
+test('global stamping still applies when no proxy has an explicit assignment (parity)', () => {
+  const beans = [parseWireGuardConf(WARP_CONF, 'WARP')];
+  const yaml = buildFromRequest({
+    core: 'mihomo', input: ['vless://' + UUID + '@192.0.2.1:443#VPS-DK'], wgBeans: beans,
+    options: Object.assign({}, opts, { wgDialerProxy: 'VPS-DK' }),
+  }).data;
+  assert.match(proxyBlock(yaml, 'WARP'), /dialer-proxy: VPS-DK/);
+});
