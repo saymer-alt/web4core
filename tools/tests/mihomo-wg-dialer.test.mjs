@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildFromRequest } from '../../src/build.js';
+import { buildMihomoPriorityConfig } from '../../src/core/mihomo.js';
 import { buildMihomoYaml } from '../../src/core/yaml.js';
 import { parseWireGuardConf } from '../../src/core/wireguard.js';
 
@@ -534,4 +535,28 @@ test('global stamping still applies when no proxy has an explicit assignment (pa
     options: Object.assign({}, opts, { wgDialerProxy: 'VPS-DK' }),
   }).data;
   assert.match(proxyBlock(yaml, 'WARP'), /dialer-proxy: VPS-DK/);
+});
+
+test('priority mode: dialer-proxy target rewritten through PRIMARY rename (target after dialed proxy)', () => {
+  // порядок намеренно «неудобный»: таргет (VPS-SE) стоит ПОСЛЕ dialed профиля
+  const se = parseWireGuardConf(WARP_CONF, 'WARP-SE');
+  se.wireguard.dialerProxy = 'VPS-SE';
+  const cfg = buildMihomoPriorityConfig(
+    { beans: [se, parseWireGuardConf(SE2_CONF, 'HOME'), parseWireGuardConf(WARP_CONF, 'VPS-SE')], subUrls: [] },
+    { beans: [], subUrls: [] }, {});
+  const dialed = cfg.proxies.find(p => p.name.endsWith('WARP-SE'));
+  assert.ok(/^PRIMARY-1: WARP-SE$/.test(dialed.name), 'PRIMARY prefix applied');
+  assert.equal(dialed['dialer-proxy'], 'PRIMARY-3: VPS-SE');
+  assert.ok(cfg.proxies.some(p => p.name === 'PRIMARY-3: VPS-SE'), 'target exists after rename');
+});
+
+test('priority mode: dialer-proxy target BEFORE dialed proxy also rewritten', () => {
+  const vps = parseWireGuardConf(WARP_CONF, 'VPS-SE');
+  const se = parseWireGuardConf(WARP_CONF, 'WARP-SE');
+  se.wireguard.dialerProxy = 'VPS-SE';
+  const cfg = buildMihomoPriorityConfig(
+    { beans: [vps, se], subUrls: [] },
+    { beans: [], subUrls: [] }, {});
+  const dialed = cfg.proxies.find(p => p.name.endsWith('WARP-SE'));
+  assert.equal(dialed['dialer-proxy'], 'PRIMARY-1: VPS-SE');
 });

@@ -1151,11 +1151,24 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
             ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts, deviceModel: opts?.deviceModel })
             : buildMihomoConfig(side.beans, { urlTest: opts?.urlTest });
         const names = [];
+        const renameMap = new Map();
+        const sideProxies = [];
         built.proxies.forEach((proxy, index) => {
             // Index prevents duplicate user names, including reserved group/builtin names.
+            const oldName = proxy.name;
             proxy.name = name + '-' + (index + 1) + ': ' + proxy.name;
+            renameMap.set(oldName, proxy.name);
             names.push(proxy.name);
+            sideProxies.push(proxy);
             proxies.push(proxy);
+        });
+        // Per-profile dialer targets are proxy names: rewrite them after the whole
+        // side is renamed (a target may sit later in the list than the dialed proxy).
+        sideProxies.forEach((proxy) => {
+            if (typeof proxy['dialer-proxy'] === 'string') {
+                const mapped = renameMap.get(proxy['dialer-proxy']);
+                if (mapped) proxy['dialer-proxy'] = mapped;
+            }
         });
         const use = [];
         Object.entries(built.providers || {}).forEach(([key, provider]) => {
