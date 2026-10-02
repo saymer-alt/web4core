@@ -153,7 +153,11 @@ function parseDomainPolicyLine(raw) {
         const value = line.slice(comma + 1).trim();
         if (DOMAIN_POLICY_RULE_TYPES.has(type)) {
             if (type === 'IP-CIDR' || type === 'IP-CIDR6') {
-                const cidr = normalizeDomainPolicyCidr(value);
+                // A trailing ,no-resolve is legal in pasted mihomo rules
+                // (MagiTrickle import emits it) and the engine re-adds it
+                // unconditionally; other options (src) change semantics and
+                // are not stripped.
+                const cidr = normalizeDomainPolicyCidr(value.replace(/,\s*no-resolve\s*$/i, ''));
                 if (!cidr) return { invalid: line };
                 return { rule: `IP-CIDR,${cidr},no-resolve` };
             }

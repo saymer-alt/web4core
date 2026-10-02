@@ -144,6 +144,29 @@ test('DPR empty policy: skipped with a warning, other policies unaffected', () =
     assert.deepEqual(Object.keys(cfg.ruleProviders), ['policy-ai']);
 });
 
+test('DPR typed CIDR lines: trailing ,no-resolve option is accepted and normalized', () => {
+    const cfg = buildMihomoSubscriptionConfig(subUrls, [], {
+        domainPolicy: [{
+            name: 'CIDR',
+            domains: [
+                'IP-CIDR,192.0.2.0/24,no-resolve',     // pasted mihomo rule with option
+                'IP-CIDR6,2001:db8::/32,no-resolve',   // v6 with option
+                'ip-cidr,198.51.100.7,NO-RESOLVE',     // case-insensitive option
+                'IP-CIDR,203.0.113.5/32,src',          // src changes semantics → invalid
+            ],
+        }],
+    });
+    const payload = cfg.ruleProviders['policy-cidr'].payload;
+    assert.deepEqual(payload, [
+        'IP-CIDR,192.0.2.0/24,no-resolve',
+        'IP-CIDR,2001:db8::/32,no-resolve',
+        'IP-CIDR,198.51.100.7/32,no-resolve',
+    ]);
+    assert.equal(cfg.warnings.length, 1);
+    assert.ok(cfg.warnings[0].includes('203.0.113.5/32,src'));
+    assert.deepEqual(cfg.rules[cfg.rules.length - 1], 'MATCH,GLOBAL');
+});
+
 test('DPR structural errors: duplicate names, reserved names, per-proxy mode', () => {
     assert.throws(
         () => buildFromRequest({
