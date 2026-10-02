@@ -1,0 +1,54 @@
+name: Candidate subscription EOL repair
+
+on:
+  push:
+    branches:
+      - feat/subscription-inspection-hwid
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/subscription-inspection-hwid
+      - name: Fetch source base
+        run: git fetch origin link-generators:refs/remotes/origin/link-generators
+      - name: Restore base bytes and reapply minimal patch
+        run: python3 tools/repair_subscription_patch_eol.py
+      - name: Verify and commit minimal source diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --numstat origin/link-generators -- src/core/subscription.js
+          if git diff --quiet -- src/core/subscription.js; then
+            echo "Source already repaired"
+            exit 0
+          fi
+          git config user.name "candidate-eol-repair"
+          git config user.email "candidate-eol-repair@users.noreply.github.com"
+          git add src/core/subscription.js
+          git commit -m "chore(subscription): preserve source line endings"
+          git push origin HEAD:feat/subscription-inspection-hwid
+
+  test:
+    needs: repair
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/subscription-inspection-hwid
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-fund --no-audit
+      - run: node --test tools/tests/subscription-fetch-headers.test.mjs tools/tests/mihomo-exclude-filter.test.mjs tools/tests/mihomo-tun-stack.test.mjs
+      - run: npm run build:web:runtime
+      - run: node --check src/web4core.runtime.js
+      - run: npm run test:amnezia
