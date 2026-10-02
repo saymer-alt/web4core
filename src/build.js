@@ -144,6 +144,7 @@ function normalizePolicyTarget(value) {
 }
 
 function normalizeDomainPolicy(raw) {
+
   if (raw === undefined || raw === null || raw === '') return [];
   if (!Array.isArray(raw)) throw new Error('Mihomo: domain policy must be an array of {name, domains}');
   const out = [];
