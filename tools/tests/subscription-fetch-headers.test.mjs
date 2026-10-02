@@ -34,15 +34,19 @@ test('fetchSubscription forwards only allowlisted device headers', async () => {
     await withFetch(async (_url, init) => {
         assert.equal(headerValue(init, 'x-hwid'), '0123456789abcdef0123456789abcdef');
         assert.equal(headerValue(init, 'x-device-model'), 'Saymer Link Generators Preview');
-        assert.equal(headerValue(init, 'x-device-os'), 'Browser');
+        assert.equal(headerValue(init, 'x-device-os'), null, 'x-device-os is not in the allowlist');
+        assert.equal(headerValue(init, 'x-ver-os'), null, 'x-ver-os is not in the allowlist');
         assert.equal(headerValue(init, 'authorization'), null);
+        assert.equal(headerValue(init, 'cookie'), null);
         return new Response(GOOD, { status: 200 });
     }, async () => {
         const result = await fetchSubscription('https://example.test/sub', { headers: {
             'X-HWID': ' 0123456789abcdef0123456789abcdef ',
             'x-device-model': ' Saymer Link Generators Preview ',
             'x-device-os': 'Browser',
-            'Authorization': 'must-not-leave-caller'
+            'x-ver-os': 'web',
+            'Authorization': 'must-not-leave-caller',
+            'Cookie': 'session=must-not-leave-caller'
         }});
         assert.equal(result, GOOD);
     });
@@ -62,22 +66,66 @@ test('browser retry keeps the same device identity', async () => {
     });
 });
 
-test('browser fallback request carries the same allowlisted headers', async () => {
+test('fallback POST contract forwards device identity in the JSON body, degrades to GET on legacy worker', async () => {
     const seen = [];
     await withFetch(async (url, init) => {
-        seen.push({ url: String(url), hwid: headerValue(init, 'x-hwid'), model: headerValue(init, 'x-device-model') });
-        if (seen.length === 1) throw new TypeError('Failed to fetch');
-        return new Response(GOOD, { status: 200 });
+        seen.push({ url: String(url), init });
+        if (seen.length === 1) throw new TypeError('Failed to fetch'); // direct CORS failure
+        if (String(url).startsWith('https://sub.web2core.workers.dev/')) {
+            const method = (init && init.method) || 'GET';
+            if (method === 'POST') {
+                if (seen.length === 2) {
+                    // legacy worker deployment without the POST contract
+                    return new Response('Add ?url=URL', { status: 400 });
+                }
+                const body = JSON.parse(init.body);
+                assert.equal(body.url, 'https://example.test/sub');
+                assert.deepEqual(body.headers, {
+                    'x-hwid': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    'x-device-model': 'Saymer Link Generators Preview'
+                });
+                assert.equal(body.headers.authorization, undefined);
+                assert.equal(body.headers['x-device-os'], undefined);
+                return new Response(GOOD, { status: 200 });
+            }
+            return new Response(GOOD, { status: 200 });
+        }
+        return new Response('nope', { status: 404 });
     }, async () => {
         globalThis.window = { document: {} };
         const result = await fetchSubscription('https://example.test/sub', { headers: {
             'x-hwid': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            'x-device-model': 'Saymer Link Generators Preview',
+            'Authorization': 'keep-me-internal'
+        }});
+        assert.equal(result, GOOD);
+        const workerCalls = seen.filter(s => String(s.url).startsWith('https://sub.web2core.workers.dev/'));
+        assert.equal(workerCalls.length, 2, 'POST once, then legacy GET degradation');
+        assert.equal(workerCalls[0].init.method, 'POST');
+        assert.equal(workerCalls[1].init.method, 'GET');
+    });
+});
+
+test('POST fallback carries the same HWID across worker retries', async () => {
+    const posts = [];
+    let postCalls = 0;
+    await withFetch(async (url, init) => {
+        if (String(url).startsWith('https://sub.web2core.workers.dev/') && init.method === 'POST') {
+            postCalls++;
+            const body = JSON.parse(init.body);
+            posts.push(body.headers['x-hwid']);
+            if (postCalls === 1) return new Response('busy', { status: 503 });
+            return new Response(GOOD, { status: 200 });
+        }
+        throw new TypeError('Failed to fetch');
+    }, async () => {
+        globalThis.window = { document: {} };
+        const result = await fetchSubscription('https://example.test/sub', { headers: {
+            'x-hwid': 'cccccccccccccccccccccccccccccccc',
             'x-device-model': 'Saymer Link Generators Preview'
         }});
         assert.equal(result, GOOD);
-        assert(seen.length >= 2);
-        assert.match(seen[1].url, /^https:\/\/sub\.web2core\.workers\.dev\//);
-        assert.equal(seen[1].hwid, 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb');
-        assert.equal(seen[1].model, 'Saymer Link Generators Preview');
+        assert.ok(posts.length >= 2, 'worker POST retried: ' + JSON.stringify(posts));
+        assert.ok(posts.every(h => h === 'cccccccccccccccccccccccccccccccc'), 'same HWID on every fallback attempt');
     });
 });

@@ -195,7 +195,7 @@ async function fetchSubscription(url, options = {}) {
     const splitLines = (text) => (text || '').split(/\n/).map(s => s.trim()).filter(Boolean);
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     const isBrowser = (typeof window !== 'undefined') && (typeof window.document !== 'undefined');
-    const allowedRequestHeaders = new Set(['x-hwid', 'x-device-model', 'x-device-os', 'x-ver-os']);
+    const allowedRequestHeaders = new Set(['x-hwid', 'x-device-model']);
     const requestHeaders = {};
     if (options && options.headers && typeof options.headers === 'object') {
         for (const [rawName, rawValue] of Object.entries(options.headers)) {
@@ -215,7 +215,7 @@ async function fetchSubscription(url, options = {}) {
         });
     }
 
-    async function tryFetch(u) {
+    async function tryFetch(u, initOverride) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), SUB_FETCH_TIMEOUT);
         try {
@@ -228,7 +228,11 @@ async function fetchSubscription(url, options = {}) {
                 }
             }
 
-            const resp = await fetch(u, Object.assign({}, FETCH_INIT, { headers, signal: controller.signal }));
+            const init = Object.assign({}, FETCH_INIT, { headers, signal: controller.signal });
+            // Fallback overrides (POST JSON contract) replace method/headers/body;
+            // allowlisted device headers still apply on top of them below.
+            if (initOverride) Object.assign(init, initOverride);
+            const resp = await fetch(u, init);
             if (!resp.ok) {
                 const reason = resp.statusText || httpReason(resp.status) || '';
                 const label = 'HTTP ' + resp.status + (reason ? (' ' + reason) : '');
@@ -330,12 +334,35 @@ async function fetchSubscription(url, options = {}) {
 
             for (const makeUrl of PUBLIC_CORS_FALLBACKS) {
                 const maxRetries = Math.max(0, Number(SUB_FALLBACK_RETRIES || 0));
-                for (let retry = 0; retry <= maxRetries; retry++) {
-                    const result = await tryFetch(makeUrl(u));
-                    const resolved = await consumeFetchResult(result);
-                    if (resolved) return resolved;
-                    if (result.error && retry < maxRetries) {
-                        await sleep(500);
+                // Device identity survives the CORS fallback: when allowlisted
+                // headers are requested, they are sent in a POST JSON body
+                // ({url, headers}) that the worker validates against its own
+                // allowlist and forwards upstream. A worker without POST
+                // support (legacy deployment) answers 400/405 — degrade to the
+                // legacy GET contract, which cannot carry custom headers.
+                const fallbackAttempts = [];
+                if (Object.keys(requestHeaders).length) {
+                    fallbackAttempts.push({
+                        kind: 'post',
+                        init: (target) => ({
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ url: target, headers: requestHeaders })
+                        })
+                    });
+                }
+                fallbackAttempts.push({ kind: 'get', init: (target) => ({}) });
+                for (const attempt of fallbackAttempts) {
+                    for (let retry = 0; retry <= maxRetries; retry++) {
+                        const result = await tryFetch(makeUrl(u), attempt.init(u));
+                        const resolved = await consumeFetchResult(result);
+                        if (resolved) return resolved;
+                        // Legacy worker without the POST contract: stop
+                        // retrying POST, fall through to GET immediately.
+                        if (attempt.kind === 'post' && result.error && /^HTTP\s+4(0[05])\b/.test(String(result.error.message || ''))) break;
+                        if (result.error && retry < maxRetries) {
+                            await sleep(500);
+                        }
                     }
                 }
             }
