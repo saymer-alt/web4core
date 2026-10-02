@@ -6,9 +6,70 @@ on:
       - feat/subscription-inspection-hwid
 
 jobs:
-  smoke:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/subscription-inspection-hwid
+      - name: Apply targeted source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('src/core/subscription.js')
+          text = path.read_text()
+          old = "async function fetchSubscription(url) {\n    if (typeof fetch !== 'function') throw new Error('Fetch API not available');\n\n    const allowedSchemes = new Set(SUPPORTED_SCHEMES.filter(s => s !== 'http' && s !== 'https'));\n    const splitLines = (text) => (text || '').split(/\\n/).map(s => s.trim()).filter(Boolean);\n    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));\n    const isBrowser = (typeof window !== 'undefined') && (typeof window.document !== 'undefined');\n"
+          new = "async function fetchSubscription(url, options = {}) {\n    if (typeof fetch !== 'function') throw new Error('Fetch API not available');\n\n    const allowedSchemes = new Set(SUPPORTED_SCHEMES.filter(s => s !== 'http' && s !== 'https'));\n    const splitLines = (text) => (text || '').split(/\\n/).map(s => s.trim()).filter(Boolean);\n    const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));\n    const isBrowser = (typeof window !== 'undefined') && (typeof window.document !== 'undefined');\n    const allowedRequestHeaders = new Set(['x-hwid', 'x-device-model', 'x-device-os', 'x-ver-os']);\n    const requestHeaders = {};\n    if (options && options.headers && typeof options.headers === 'object') {\n        for (const [rawName, rawValue] of Object.entries(options.headers)) {\n            const name = String(rawName || '').trim().toLowerCase();\n            if (!allowedRequestHeaders.has(name) || rawValue === undefined || rawValue === null) continue;\n            const value = String(rawValue).trim();\n            if (value) requestHeaders[name] = value;\n        }\n    }\n"
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif "async function fetchSubscription(url, options = {})" not in text:
+              raise SystemExit('subscription signature anchor not found')
+
+          old = "            const headers = new Headers((FETCH_INIT && FETCH_INIT.headers) ? FETCH_INIT.headers : {});\n            if (!headers.has('Accept')) headers.set('Accept', 'text/plain, */*');\n            if (!isBrowser) {\n"
+          new = "            const headers = new Headers((FETCH_INIT && FETCH_INIT.headers) ? FETCH_INIT.headers : {});\n            if (!headers.has('Accept')) headers.set('Accept', 'text/plain, */*');\n            for (const [name, value] of Object.entries(requestHeaders)) headers.set(name, value);\n            if (!isBrowser) {\n"
+          if old in text:
+              text = text.replace(old, new, 1)
+          elif "for (const [name, value] of Object.entries(requestHeaders)) headers.set(name, value);" not in text:
+              raise SystemExit('headers anchor not found')
+
+          path.write_text(text)
+          PY
+          git diff --check
+          git status --short
+      - name: Commit source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- src/core/subscription.js; then
+            echo "Source already patched"
+            exit 0
+          fi
+          git config user.name "candidate-patcher"
+          git config user.email "candidate-patcher@users.noreply.github.com"
+          git add src/core/subscription.js
+          git commit -m "feat(subscription): support device headers for preview fetch"
+          git push origin HEAD:feat/subscription-inspection-hwid
+
+  test:
+    needs: patch
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - run: echo candidate-workflow-ok
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/subscription-inspection-hwid
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - run: npm ci --no-fund --no-audit
+      - run: node --test tools/tests/subscription-fetch-headers.test.mjs tools/tests/mihomo-exclude-filter.test.mjs tools/tests/mihomo-tun-stack.test.mjs
+      - run: npm run build:web:runtime
+      - run: node --check src/web4core.runtime.js
+      - run: npm run test:amnezia
