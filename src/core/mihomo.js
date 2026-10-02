@@ -182,6 +182,15 @@ function parseDomainPolicyLine(raw) {
     }
     const cidr = normalizeDomainPolicyCidr(line);
     if (cidr) return { rule: `IP-CIDR,${cidr},no-resolve` };
+        // Bare wildcard patterns: a leading '*.' is legacy DOMAIN-SUFFIX,
+        // but any other * / ? placement (MT-style 'yt*.ggpht.com',
+        // '*.rutracker.*') is DOMAIN-WILDCARD, not a broken DOMAIN-SUFFIX.
+        if (/[*?]/.test(line.slice(2))) {
+            if (/^[a-z0-9_*?][a-z0-9_*?.-]*$/i.test(line) && /[a-z0-9]/i.test(line) && !line.includes('..')) {
+                return { rule: `DOMAIN-WILDCARD,${line.toLowerCase()}` };
+            }
+            return { invalid: line };
+        }
     if (!DOMAIN_POLICY_HOSTNAME_RE.test(line)) return { invalid: line };
     return { rule: `DOMAIN-SUFFIX,${line.toLowerCase().replace(/^\*\./, '')}` };
 }
@@ -239,6 +248,12 @@ function buildDomainPolicyArtifacts(policies, ctx) {
         // category group; GLOBAL/DIRECT/REJECT point the whole policy rule
         // at the builtin target without creating any group.
         const rawTarget = String(policy?.target || '').trim().toUpperCase();
+        // Engine-level strictness: direct callers (tests/tools) bypass the
+        // upstream normalization, so an unknown target must not silently
+        // degrade to legacy SELECT semantics.
+        if (rawTarget !== '' && rawTarget !== 'SELECT' && rawTarget !== 'GLOBAL' && rawTarget !== 'DIRECT' && rawTarget !== 'REJECT') {
+            throw new Error(`Mihomo: domain policy target must be SELECT, GLOBAL, DIRECT or REJECT: "${rawTarget}"`);
+        }
         const ruleTarget = rawTarget === 'GLOBAL' || rawTarget === 'DIRECT' || rawTarget === 'REJECT' ? rawTarget : 'SELECT';
         if (ruleTarget === 'SELECT') {
             rules.push(`RULE-SET,${slug},${name}`);
