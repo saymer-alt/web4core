@@ -1,0 +1,47 @@
+name: Candidate clean subscription patch
+
+on:
+  push:
+    branches:
+      - feat/subscription-inspection-hwid-clean
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/subscription-inspection-hwid-clean
+      - run: python3 tools/apply_subscription_headers_patch.py
+      - name: Verify minimal diff and commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --numstat -- src/core/subscription.js
+          git config user.name "candidate-clean"
+          git config user.email "candidate-clean@users.noreply.github.com"
+          git add src/core/subscription.js
+          git commit -m "feat(subscription): support device headers for preview fetch"
+          git push origin HEAD:feat/subscription-inspection-hwid-clean
+
+  test:
+    needs: patch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/subscription-inspection-hwid-clean
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --no-fund --no-audit
+      - run: node --test tools/tests/subscription-fetch-headers.test.mjs tools/tests/mihomo-exclude-filter.test.mjs tools/tests/mihomo-tun-stack.test.mjs
+      - run: npm run build:web:runtime
+      - run: node --check src/web4core.runtime.js
+      - run: npm run test:amnezia
