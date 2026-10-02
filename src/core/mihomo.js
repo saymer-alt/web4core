@@ -166,6 +166,15 @@ function parseDomainPolicyLine(raw) {
                 if (!value || !/^[a-z0-9._*?+|^$()\[\]{}\\-]+$/i.test(value)) return { invalid: line };
                 return { rule: `${type},${value}` };
             }
+            if (type === 'DOMAIN-WILDCARD') {
+                // Mihomo DOMAIN-WILDCARD: * and ? are wildcards anywhere in
+                // the pattern. Real MagiTrickle exports use patterns like
+                // yt*.ggpht.com / *.rutracker.* that are not hostnames, so
+                // wildcard values get charset validation instead of the
+                // hostname regex below.
+                if (!value || !/^[a-z0-9_*?][a-z0-9_*?.-]*$/i.test(value) || !/[a-z0-9]/i.test(value) || value.includes('..')) return { invalid: line };
+                return { rule: `DOMAIN-WILDCARD,${value.toLowerCase()}` };
+            }
             if (!value || !DOMAIN_POLICY_HOSTNAME_RE.test(value)) return { invalid: line };
             return { rule: `${type},${value.toLowerCase()}` };
         }
@@ -173,6 +182,15 @@ function parseDomainPolicyLine(raw) {
     }
     const cidr = normalizeDomainPolicyCidr(line);
     if (cidr) return { rule: `IP-CIDR,${cidr},no-resolve` };
+        // Bare wildcard patterns: a leading '*.' is legacy DOMAIN-SUFFIX,
+        // but any other * / ? placement (MT-style 'yt*.ggpht.com',
+        // '*.rutracker.*') is DOMAIN-WILDCARD, not a broken DOMAIN-SUFFIX.
+        if (/[*?]/.test(line.slice(2))) {
+            if (/^[a-z0-9_*?][a-z0-9_*?.-]*$/i.test(line) && /[a-z0-9]/i.test(line) && !line.includes('..')) {
+                return { rule: `DOMAIN-WILDCARD,${line.toLowerCase()}` };
+            }
+            return { invalid: line };
+        }
     if (!DOMAIN_POLICY_HOSTNAME_RE.test(line)) return { invalid: line };
     return { rule: `DOMAIN-SUFFIX,${line.toLowerCase().replace(/^\*\./, '')}` };
 }
@@ -226,7 +244,23 @@ function buildDomainPolicyArtifacts(policies, ctx) {
         }
         const slug = domainPolicySlug(name, index, usedSlugs);
         ruleProviders[slug] = { type: 'inline', behavior: 'classical', format: 'yaml', payload };
-        rules.push(`RULE-SET,${slug},${name}`);
+        // Policy rule target (DPR v2): SELECT keeps the legacy per-policy
+        // category group; GLOBAL/DIRECT/REJECT point the whole policy rule
+        // at the builtin target without creating any group.
+        const rawTarget = String(policy?.target || '').trim().toUpperCase();
+        // Engine-level strictness: direct callers (tests/tools) bypass the
+        // upstream normalization, so an unknown target must not silently
+        // degrade to legacy SELECT semantics.
+        if (rawTarget !== '' && rawTarget !== 'SELECT' && rawTarget !== 'GLOBAL' && rawTarget !== 'DIRECT' && rawTarget !== 'REJECT') {
+            throw new Error(`Mihomo: domain policy target must be SELECT, GLOBAL, DIRECT or REJECT: "${rawTarget}"`);
+        }
+        const ruleTarget = rawTarget === '' ? 'SELECT' : rawTarget;
+        if (ruleTarget === 'SELECT') {
+            rules.push(`RULE-SET,${slug},${name}`);
+        } else {
+            rules.push(`RULE-SET,${slug},${ruleTarget}`);
+        }
+        if (ruleTarget === 'SELECT') {
         if (ctx.mode === 'subscription') {
             groups.push({
                 name: `${name}-AUTO`,
@@ -264,6 +298,7 @@ function buildDomainPolicyArtifacts(policies, ctx) {
             });
         }
         existingGroups.add(name);
+        } // end ruleTarget === 'SELECT' (non-SELECT targets emit no category group)
     });
     return { ruleProviders, groups, rules, warnings };
 }

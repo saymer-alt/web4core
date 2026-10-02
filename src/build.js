@@ -131,6 +131,18 @@ function applyRealityModernHosts(beans, modernHosts) {
 // here (empty/duplicate/comma names); per-line parsing and reserved/group-name
 // conflicts belong to the engine (core/mihomo.js), which reports skipped lines
 // as non-blocking warnings instead of failing the build.
+// Policy rule target (DPR v2): SELECT = legacy per-policy select group;
+// GLOBAL/DIRECT/REJECT route the whole policy rule at the builtin target
+// without creating a category group. Absent/empty preserves legacy output.
+const DOMAIN_POLICY_TARGETS = new Set(['SELECT', 'GLOBAL', 'DIRECT', 'REJECT']);
+
+function normalizePolicyTarget(value) {
+  const t = String(value === undefined || value === null ? '' : value).trim().toUpperCase();
+  if (!t) return 'SELECT';
+  if (DOMAIN_POLICY_TARGETS.has(t)) return t;
+  throw new Error('Mihomo: domain policy target must be SELECT, GLOBAL, DIRECT or REJECT: "' + value + '"');
+}
+
 function normalizeDomainPolicy(raw) {
   if (raw === undefined || raw === null || raw === '') return [];
   if (!Array.isArray(raw)) throw new Error('Mihomo: domain policy must be an array of {name, domains}');
@@ -147,7 +159,8 @@ function normalizeDomainPolicy(raw) {
     const domains = typeof item.domains === 'string'
       ? item.domains.split(/\r?\n/)
       : Array.isArray(item.domains) ? item.domains.map((s) => String(s)) : [];
-    out.push({ name, domains });
+    const target = normalizePolicyTarget(item.target);
+    out.push({ name, domains, target });
   }
   return out;
 }
