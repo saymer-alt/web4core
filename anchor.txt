@@ -1,10 +1,0 @@
-    if (seen.has(name)) throw new Error(`Mihomo: duplicate domain policy name: "${name}"`);
-    seen.add(name);
-    const domains = typeof item.domains === 'string'
-      ? item.domains.split(/?
-/)
-      : Array.isArray(item.domains) ? item.domains.map((s) => String(s)) : [];
-    out.push({ name, domains });
-  }
-  return out;
-}
