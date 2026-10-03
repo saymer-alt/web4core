@@ -188,13 +188,23 @@ function httpReason(status) {
     return map[status] || '';
 }
 
-async function fetchSubscription(url) {
+async function fetchSubscription(url, options = {}) {
     if (typeof fetch !== 'function') throw new Error('Fetch API not available');
 
     const allowedSchemes = new Set(SUPPORTED_SCHEMES.filter(s => s !== 'http' && s !== 'https'));
     const splitLines = (text) => (text || '').split(/\n/).map(s => s.trim()).filter(Boolean);
     const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
     const isBrowser = (typeof window !== 'undefined') && (typeof window.document !== 'undefined');
+    const allowedRequestHeaders = new Set(['x-hwid', 'x-device-model']);
+    const requestHeaders = {};
+    if (options && options.headers && typeof options.headers === 'object') {
+        for (const [rawName, rawValue] of Object.entries(options.headers)) {
+            const name = String(rawName || '').trim().toLowerCase();
+            if (!allowedRequestHeaders.has(name) || rawValue === undefined || rawValue === null) continue;
+            const value = String(rawValue).trim();
+            if (value) requestHeaders[name] = value;
+        }
+    }
 
     function hasRealSubscriptionLinks(text) {
         const lines = splitLines(text);
@@ -205,19 +215,34 @@ async function fetchSubscription(url) {
         });
     }
 
-    async function tryFetch(u) {
+    // attempt (необязательно): {
+    //   init?: object — literal fetch init override (POST JSON контракт);
+    //   deviceHeaders?: boolean — false убирает унаследованные device headers.
+    // }
+    // Legacy GET fallback обязан оставаться CORS simple request (только
+    // простые заголовки вроде Accept): у старого production worker нет
+    // OPTIONS/allow-headers, и любой кастомный заголовок вызывает preflight,
+    // который тот воркер не отвечает.
+    async function tryFetch(u, attempt) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), SUB_FETCH_TIMEOUT);
         try {
             const headers = new Headers((FETCH_INIT && FETCH_INIT.headers) ? FETCH_INIT.headers : {});
             if (!headers.has('Accept')) headers.set('Accept', 'text/plain, */*');
+            if (!attempt || attempt.deviceHeaders !== false) {
+                for (const [name, value] of Object.entries(requestHeaders)) headers.set(name, value);
+            }
             if (!isBrowser) {
                 if (/github\.com|raw\.githubusercontent\.com/i.test(u)) {
                     headers.set('Referer', 'https://github.com/');
                 }
             }
 
-            const resp = await fetch(u, Object.assign({}, FETCH_INIT, { headers, signal: controller.signal }));
+            const init = Object.assign({}, FETCH_INIT, { headers, signal: controller.signal });
+            // POST JSON контракт подменяет method/headers/body целиком —
+            // identity в этом случае уезжает в JSON body, не в заголовки.
+            if (attempt && attempt.init) Object.assign(init, attempt.init);
+            const resp = await fetch(u, init);
             if (!resp.ok) {
                 const reason = resp.statusText || httpReason(resp.status) || '';
                 const label = 'HTTP ' + resp.status + (reason ? (' ' + reason) : '');
@@ -319,12 +344,39 @@ async function fetchSubscription(url) {
 
             for (const makeUrl of PUBLIC_CORS_FALLBACKS) {
                 const maxRetries = Math.max(0, Number(SUB_FALLBACK_RETRIES || 0));
-                for (let retry = 0; retry <= maxRetries; retry++) {
-                    const result = await tryFetch(makeUrl(u));
-                    const resolved = await consumeFetchResult(result);
-                    if (resolved) return resolved;
-                    if (result.error && retry < maxRetries) {
-                        await sleep(500);
+                // Device identity survives the CORS fallback: when allowlisted
+                // headers are requested, they are sent in a POST JSON body
+                // ({url, headers}) that the worker validates against its own
+                // allowlist and forwards upstream. A worker without POST
+                // support (legacy deployment) answers 400/405 — degrade to the
+                // legacy GET contract, which stays a CORS simple request
+                // (deviceHeaders: false — без x-hwid/x-device-model, иначе
+                // preflight, на который легаси-воркер не отвечает).
+                const fallbackAttempts = [];
+                if (Object.keys(requestHeaders).length) {
+                    fallbackAttempts.push({
+                        kind: 'post',
+                        attemptFor: (target) => ({
+                            init: {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ url: target, headers: requestHeaders })
+                            }
+                        })
+                    });
+                }
+                fallbackAttempts.push({ kind: 'get', attemptFor: () => ({ deviceHeaders: false }) });
+                for (const attempt of fallbackAttempts) {
+                    for (let retry = 0; retry <= maxRetries; retry++) {
+                        const result = await tryFetch(makeUrl(u), attempt.attemptFor(u));
+                        const resolved = await consumeFetchResult(result);
+                        if (resolved) return resolved;
+                        // Legacy worker without the POST contract: stop
+                        // retrying POST, fall through to GET immediately.
+                        if (attempt.kind === 'post' && result.error && /^HTTP\s+4(0[05])\b/.test(String(result.error.message || ''))) break;
+                        if (result.error && retry < maxRetries) {
+                            await sleep(500);
+                        }
                     }
                 }
             }

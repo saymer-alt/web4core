@@ -1,0 +1,86 @@
+# Custom-branch CI для saymer-alt/web4core (ветка link-generators и PR в неё).
+# Наследованный build.yml ориентирован на upstream main (Pages/Cloudflare,
+# secrets) и PR-события не обрабатывает — этот workflow является обязательной
+# проверкой fork-ветки и PR-ов, fail-closed, без deploy-шагов и write-token.
+#
+# Consumer contract: runtime прогоняется через tests/runtime.cjs актуального
+# saymer-alt/link-generators (read-only checkout, без секретов) — drift
+# контракта с consumer виден прямо в PR.
+name: Fork CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - link-generators
+  pull_request:
+    branches:
+      - link-generators
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fork-tests:
+    name: source tests + worker tests + runtime build + consumer contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # fetch-depth: 0 — нужен для git diff --check против merge-base.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-fund --no-audit
+
+      - name: Worker bundle (gitignored build artifact для amnezia.test.mjs)
+        run: npm run build:worker
+
+      # Auto-discovery: все tools/tests/*.test.mjs — исходные unit-тесты
+      # (exclude-filter, tun-stack, DPR/policy-targets, reality-mlkem, dedup…),
+      # subscription fetch headers, subscription worker контракт (реальный
+      # worker.fetch против мок-upstream: legacy GET, POST allowlist, SSRF/
+      # redirects/size/no-store/sanitized errors), amnezia suite.
+      - name: Source and worker test suite
+        run: node --test tools/tests/*.test.mjs
+
+      - name: Build web runtime
+        run: npm run build:web:runtime
+
+      - name: Runtime syntax
+        run: node --check src/web4core.runtime.js
+
+      - name: Diff hygiene (whitespace errors против merge-base)
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha || 'origin/link-generators' }}"
+          git diff --check "$base"...HEAD || {
+            echo 'whitespace errors in diff'; exit 1;
+          }
+
+      - name: Consumer contract (link-generators runtime regression)
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/saymer-alt/link-generators.git "$RUNNER_TEMP/consumer"
+          node "$RUNNER_TEMP/consumer/tests/runtime.cjs" src/web4core.runtime.js
+
+      - name: Review summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha || 'origin/link-generators' }}"
+          git diff --stat "$base"...HEAD
+          git status --short
