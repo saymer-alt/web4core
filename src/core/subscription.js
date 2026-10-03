@@ -215,13 +215,23 @@ async function fetchSubscription(url, options = {}) {
         });
     }
 
-    async function tryFetch(u, initOverride) {
+    // attempt (необязательно): {
+    //   init?: object — literal fetch init override (POST JSON контракт);
+    //   deviceHeaders?: boolean — false убирает унаследованные device headers.
+    // }
+    // Legacy GET fallback обязан оставаться CORS simple request (только
+    // простые заголовки вроде Accept): у старого production worker нет
+    // OPTIONS/allow-headers, и любой кастомный заголовок вызывает preflight,
+    // который тот воркер не отвечает.
+    async function tryFetch(u, attempt) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), SUB_FETCH_TIMEOUT);
         try {
             const headers = new Headers((FETCH_INIT && FETCH_INIT.headers) ? FETCH_INIT.headers : {});
             if (!headers.has('Accept')) headers.set('Accept', 'text/plain, */*');
-            for (const [name, value] of Object.entries(requestHeaders)) headers.set(name, value);
+            if (!attempt || attempt.deviceHeaders !== false) {
+                for (const [name, value] of Object.entries(requestHeaders)) headers.set(name, value);
+            }
             if (!isBrowser) {
                 if (/github\.com|raw\.githubusercontent\.com/i.test(u)) {
                     headers.set('Referer', 'https://github.com/');
@@ -229,9 +239,9 @@ async function fetchSubscription(url, options = {}) {
             }
 
             const init = Object.assign({}, FETCH_INIT, { headers, signal: controller.signal });
-            // Fallback overrides (POST JSON contract) replace method/headers/body;
-            // allowlisted device headers still apply on top of them below.
-            if (initOverride) Object.assign(init, initOverride);
+            // POST JSON контракт подменяет method/headers/body целиком —
+            // identity в этом случае уезжает в JSON body, не в заголовки.
+            if (attempt && attempt.init) Object.assign(init, attempt.init);
             const resp = await fetch(u, init);
             if (!resp.ok) {
                 const reason = resp.statusText || httpReason(resp.status) || '';
@@ -339,22 +349,26 @@ async function fetchSubscription(url, options = {}) {
                 // ({url, headers}) that the worker validates against its own
                 // allowlist and forwards upstream. A worker without POST
                 // support (legacy deployment) answers 400/405 — degrade to the
-                // legacy GET contract, which cannot carry custom headers.
+                // legacy GET contract, which stays a CORS simple request
+                // (deviceHeaders: false — без x-hwid/x-device-model, иначе
+                // preflight, на который легаси-воркер не отвечает).
                 const fallbackAttempts = [];
                 if (Object.keys(requestHeaders).length) {
                     fallbackAttempts.push({
                         kind: 'post',
-                        init: (target) => ({
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ url: target, headers: requestHeaders })
+                        attemptFor: (target) => ({
+                            init: {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ url: target, headers: requestHeaders })
+                            }
                         })
                     });
                 }
-                fallbackAttempts.push({ kind: 'get', init: (target) => ({}) });
+                fallbackAttempts.push({ kind: 'get', attemptFor: () => ({ deviceHeaders: false }) });
                 for (const attempt of fallbackAttempts) {
                     for (let retry = 0; retry <= maxRetries; retry++) {
-                        const result = await tryFetch(makeUrl(u), attempt.init(u));
+                        const result = await tryFetch(makeUrl(u), attempt.attemptFor(u));
                         const resolved = await consumeFetchResult(result);
                         if (resolved) return resolved;
                         // Legacy worker without the POST contract: stop

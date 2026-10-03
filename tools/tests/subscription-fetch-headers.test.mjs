@@ -103,6 +103,36 @@ test('fallback POST contract forwards device identity in the JSON body, degrades
         assert.equal(workerCalls.length, 2, 'POST once, then legacy GET degradation');
         assert.equal(workerCalls[0].init.method, 'POST');
         assert.equal(workerCalls[1].init.method, 'GET');
+        // Legacy GET — CORS simple request: никаких device headers и никаких
+        // не-simple заголовков (иначе браузер сделает preflight, который
+        // легаси-воркер не отвечает).
+        const getHeaders = new Headers(workerCalls[1].init.headers || {});
+        assert.equal(getHeaders.get('x-hwid'), null, 'legacy GET без x-hwid');
+        assert.equal(getHeaders.get('x-device-model'), null, 'legacy GET без x-device-model');
+        assert.equal(getHeaders.get('content-type'), null, 'legacy GET без application/json');
+        assert.equal(getHeaders.get('authorization'), null);
+        // Identity уходит в POST body, а не в заголовки POST-запроса.
+        const postHeaders = new Headers(workerCalls[0].init.headers || {});
+        assert.equal(postHeaders.get('content-type'), 'application/json');
+        assert.equal(postHeaders.get('x-hwid'), null, 'POST: identity в body, не в заголовках');
+    });
+});
+
+test('legacy GET fallback URL stays the legacy contract (?url=encoded)', async () => {
+    const seen = [];
+    await withFetch(async (url, init) => {
+        seen.push({ url: String(url), method: (init && init.method) || 'GET' });
+        if (seen.length === 1) throw new TypeError('Failed to fetch');
+        // legacy worker: только GET, POST не поддерживает
+        if (seen[seen.length - 1].method === 'POST') return new Response('Add ?url=URL', { status: 400 });
+        return new Response(GOOD, { status: 200 });
+    }, async () => {
+        globalThis.window = { document: {} };
+        const result = await fetchSubscription('https://example.test/sub', { headers: { 'x-hwid': 'dddddddddddddddddddddddddddddddd' } });
+        assert.equal(result, GOOD);
+        const last = seen[seen.length - 1];
+        assert.match(last.url, /^https:\/\/sub\.web2core\.workers\.dev\/\?url=https%3A%2F%2Fexample\.test%2Fsub$/);
+        assert.equal(last.method, 'GET');
     });
 });
 

@@ -88,6 +88,97 @@ test('worker caps redirects and surfaces upstream failure without URL echo', asy
     assert.equal(await fail.text(), 'Upstream fetch failed');
 });
 
+test('redirect: upstream fetch uses manual mode so the limit governs the chain', async () => {
+    const methods = [];
+    const req = jsonRequest({ url: UPSTREAM, headers: {} });
+    await callWorker(req, async (_target, init) => {
+        methods.push(init && init.redirect);
+        return new Response('final', { status: 200 });
+    });
+    assert.equal(methods[0], 'manual', 'upstream fetch в manual-режиме: лимит воркера управляет цепочкой');
+});
+
+test('redirect: one 302 hop then 200 succeeds', async () => {
+    const calls = [];
+    const req = jsonRequest({ url: UPSTREAM, headers: {} });
+    const resp = await callWorker(req, async (target) => {
+        calls.push(String(target));
+        if (calls.length === 1) return new Response(null, { status: 302, headers: { Location: UPSTREAM + '?next' } });
+        return new Response('after-hop', { status: 200 });
+    });
+    assert.equal(resp.status, 200);
+    assert.equal(await resp.text(), 'after-hop');
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1], UPSTREAM + '?next');
+});
+
+test('redirect: relative Location resolves against the current URL', async () => {
+    const calls = [];
+    const req = jsonRequest({ url: 'https://sub.example.test/dir/page', headers: {} });
+    const resp = await callWorker(req, async (target) => {
+        calls.push(String(target));
+        if (calls.length === 1) return new Response(null, { status: 302, headers: { Location: '/next' } });
+        return new Response('relative-ok', { status: 200 });
+    });
+    assert.equal(resp.status, 200);
+    assert.equal(calls[1], 'https://sub.example.test/next');
+});
+
+test('redirect: exactly MAX_REDIRECTS hops still succeeds', async () => {
+    const calls = [];
+    const req = jsonRequest({ url: UPSTREAM, headers: {} });
+    const resp = await callWorker(req, async (target) => {
+        calls.push(String(target));
+        if (calls.length <= 5) return new Response(null, { status: 302, headers: { Location: UPSTREAM + '?hop=' + calls.length } });
+        return new Response('made-it', { status: 200 });
+    });
+    assert.equal(resp.status, 200);
+    assert.equal(await resp.text(), 'made-it');
+    assert.equal(calls.length, 6, 'initial fetch + 5 разрешённых redirect-хопов');
+});
+
+test('redirect: MAX_REDIRECTS + 1 → 508 Too many redirects', async () => {
+    const calls = [];
+    const req = jsonRequest({ url: UPSTREAM, headers: {} });
+    const resp = await callWorker(req, async (target) => {
+        calls.push(String(target));
+        return new Response(null, { status: 302, headers: { Location: UPSTREAM + '?hop=' + calls.length } });
+    });
+    assert.equal(resp.status, 508);
+    assert.equal(calls.length, 6, 'ровно MAX_REDIRECTS+1 fetch-ей, дальше не ходим');
+    assert.equal(await resp.text(), 'Too many redirects');
+});
+
+test('redirect: non-http(s) Location rejected BEFORE fetching the forbidden scheme', async () => {
+    const calls = [];
+    const req = jsonRequest({ url: UPSTREAM, headers: {} });
+    const resp = await callWorker(req, async (target) => {
+        calls.push(String(target));
+        if (calls.length === 1) return new Response(null, { status: 302, headers: { Location: 'file:///etc/passwd' } });
+        return new Response('must-not-happen', { status: 200 });
+    });
+    assert.equal(resp.status, 502);
+    assert.equal(await resp.text(), 'Redirect to a non-http(s) target rejected');
+    assert.equal(calls.length, 1, 'запрещённая схема не fetch-ится');
+    assert.ok(!calls.some(c => c.startsWith('file:')), 'нет fetch file://');
+    const ftp = await callWorker(jsonRequest({ url: UPSTREAM, headers: {} }), async () => {
+        return new Response(null, { status: 302, headers: { Location: 'ftp://sub.example.test/x' } });
+    });
+    assert.equal(ftp.status, 502);
+    assert.ok(!(await ftp.text()).includes('sub.example.test'), 'нет URL-эха в ошибке');
+});
+
+test('redirect: self-referencing loop bounded with a finite fetch count', async () => {
+    const req = jsonRequest({ url: UPSTREAM, headers: {} });
+    let n = 0;
+    const resp = await callWorker(req, async () => {
+        n++;
+        return new Response(null, { status: 302, headers: { Location: UPSTREAM } });
+    });
+    assert.equal(resp.status, 508);
+    assert.ok(n <= 6, 'loop bounded: ' + n);
+});
+
 test('OPTIONS preflight answered without touching the upstream', async () => {
     const req = new Request('https://sub.web2core.workers.dev/', { method: 'OPTIONS' });
     const resp = await callWorker(req, async () => { throw new Error('upstream must not be called'); });

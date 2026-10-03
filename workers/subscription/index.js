@@ -46,11 +46,14 @@ function collectForwardHeaders(rawHeaders) {
 }
 
 async function fetchUpstream(target, forwardHeaders) {
+    // redirect: "manual" — HTTP redirect chain ограничивается resolveUpstream
+    // (MAX_REDIRECTS + повторная http(s)-валидация каждого хопа);
+    // "follow" обошёл бы лимит внутри самого fetch.
     let response;
     if (forwardHeaders && Object.keys(forwardHeaders).length) {
         response = await fetch(target, {
             method: "GET",
-            redirect: "follow",
+            redirect: "manual",
             headers: {
                 "User-Agent": "curl/8.7.1",
                 "Accept": "*/*",
@@ -62,7 +65,7 @@ async function fetchUpstream(target, forwardHeaders) {
     } else {
         response = await fetch(target, {
             method: "GET",
-            redirect: "follow",
+            redirect: "manual",
             headers: {
                 "User-Agent": "curl/8.7.1",
                 "Accept": "*/*",
@@ -105,17 +108,26 @@ function isRedirect(status) {
 }
 
 async function resolveUpstream(target, forwardHeaders) {
-    // Manual redirect handling keeps the redirect count bounded; the forwarded
-    // device headers follow the target only (dropped on cross-origin hops is
-    // the platform's default behaviour for fetch with redirect: "follow" —
-    // here we keep them, they carry no credentials).
+    // Ручной redirect-chain: каждый хоп валидируется заново (http/https only,
+    // относительный Location разрешается от текущего URL), лимит hops —
+    // MAX_REDIRECTS, ошибки — generic, без эха полного target URL.
     let current = target;
     for (let i = 0; i <= MAX_REDIRECTS; i++) {
         const response = await fetchUpstream(current, forwardHeaders);
         if (isRedirect(response.status)) {
             const location = response.headers.get("Location");
-            if (!location) return response;
-            current = new URL(location, current).toString();
+            if (!location) return textResponse("Upstream redirect without Location", 502);
+            let next;
+            try {
+                next = new URL(location, current);
+            } catch (_) {
+                return textResponse("Invalid redirect target", 502);
+            }
+            if (next.protocol !== "http:" && next.protocol !== "https:") {
+                // Перенаправление в запрещённую схему — не fetch-им её вообще.
+                return textResponse("Redirect to a non-http(s) target rejected", 502);
+            }
+            current = next.toString();
             continue;
         }
         return response;
