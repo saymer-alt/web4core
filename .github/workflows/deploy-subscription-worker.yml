@@ -15,6 +15,14 @@ on:
         required: false
         default: 'link-generators'
         type: string
+  # Регистрация workflow в GitHub: workflow_dispatch доступен только после
+  # первого event. Push-триггер ограничен самим workflow-файлом (paths) и
+  # запускает только валидацию без deploy — deploy всегда ручной.
+  push:
+    branches:
+      - link-generators
+    paths:
+      - '.github/workflows/deploy-subscription-worker.yml'
 
 permissions:
   contents: read
