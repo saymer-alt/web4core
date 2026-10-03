@@ -1,5 +1,10 @@
 name: Verify subscription worker deployments
 on:
+  push:
+    branches:
+      - link-generators
+    paths:
+      - '.github/workflows/verify-worker.yml'
   workflow_dispatch:
 
 permissions:
