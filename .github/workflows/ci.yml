@@ -47,19 +47,21 @@ jobs:
       - name: Worker bundle (gitignored build artifact для amnezia.test.mjs)
         run: npm run build:worker
 
-      # Auto-discovery: все tools/tests/*.test.mjs — исходные unit-тесты
-      # (exclude-filter, tun-stack, DPR/policy-targets, reality-mlkem, dedup…),
-      # subscription fetch headers, subscription worker контракт (реальный
-      # worker.fetch против мок-upstream: legacy GET, POST allowlist, SSRF/
-      # redirects/size/no-store/sanitized errors), amnezia suite.
-      - name: Source and worker test suite
-        run: node --test tools/tests/*.test.mjs
-
+      # Runtime собирается ДО тестов: subscription-endpoint.test.mjs читает
+      # собранный бандл и доказывает, что production endpoint совпадает с source.
       - name: Build web runtime
         run: npm run build:web:runtime
 
       - name: Runtime syntax
         run: node --check src/web4core.runtime.js
+
+      # Auto-discovery: все tools/tests/*.test.mjs — исходные unit-тесты
+      # (exclude-filter, tun-stack, DPR/policy-targets, reality-mlkem, dedup…),
+      # subscription fetch headers, subscription worker контракт (реальный
+      # worker.fetch против мок-upstream: legacy GET, POST allowlist, SSRF/
+      # redirects/size/no-store/sanitized errors), endpoint contract, amnezia.
+      - name: Source and worker test suite
+        run: node --test tools/tests/*.test.mjs
 
       - name: Diff hygiene (whitespace errors против merge-base)
         shell: bash
