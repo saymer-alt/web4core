@@ -1,0 +1,59 @@
+# Manual deploy для production subscription worker (sub.web2core.workers.dev).
+# Отдельный workflow: деплоит только workers/subscription из опубликованной
+# ветки web4core:link-generators. Никаких deploy на push; никакой OAuth —
+# используется тот же Cloudflare secrets contract, что у deploy-worker-api
+# в build.yml (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID).
+# Worker обрабатывает чувствительные подписочные URL/заголовки — observability
+# и логирование не включаются; секреты в логи не печатаются.
+name: Deploy subscription worker
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Published source branch/SHA (default: link-generators)'
+        required: false
+        default: 'link-generators'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-subscription-worker
+  cancel-in-progress: false
+
+jobs:
+  deploy-sub:
+    name: deploy sub.web2core.workers.dev
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout published source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || 'link-generators' }}
+          persist-credentials: false
+
+      - name: Record deployed source revision
+        run: |
+          echo "Deploying source commit: $(git rev-parse HEAD)"
+
+      - name: Verify worker files exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s workers/subscription/index.js
+          test -s workers/subscription/wrangler.toml
+
+      - name: Worker syntax check
+        run: node --check workers/subscription/index.js
+
+      - name: Deploy subscription worker with Wrangler
+        uses: cloudflare/wrangler-action@v4
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: workers/subscription
+          wranglerVersion: '4.54.0'
+          command: deploy
