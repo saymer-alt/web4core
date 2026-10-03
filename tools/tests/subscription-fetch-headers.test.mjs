@@ -71,11 +71,11 @@ test('fallback POST contract forwards device identity in the JSON body, degrades
     await withFetch(async (url, init) => {
         seen.push({ url: String(url), init });
         if (seen.length === 1) throw new TypeError('Failed to fetch'); // direct CORS failure
-        if (String(url).startsWith('https://sub.web2core.workers.dev/')) {
+        if (String(url).startsWith('https://sub.saymer-87.workers.dev/')) {
             const method = (init && init.method) || 'GET';
             if (method === 'POST') {
                 if (seen.length === 2) {
-                    // legacy worker deployment without the POST contract
+                    // our worker before the POST contract deployment (legacy deployment)
                     return new Response('Add ?url=URL', { status: 400 });
                 }
                 const body = JSON.parse(init.body);
@@ -99,7 +99,7 @@ test('fallback POST contract forwards device identity in the JSON body, degrades
             'Authorization': 'keep-me-internal'
         }});
         assert.equal(result, GOOD);
-        const workerCalls = seen.filter(s => String(s.url).startsWith('https://sub.web2core.workers.dev/'));
+        const workerCalls = seen.filter(s => String(s.url).startsWith('https://sub.saymer-87.workers.dev/'));
         assert.equal(workerCalls.length, 2, 'POST once, then legacy GET degradation');
         assert.equal(workerCalls[0].init.method, 'POST');
         assert.equal(workerCalls[1].init.method, 'GET');
@@ -131,7 +131,7 @@ test('legacy GET fallback URL stays the legacy contract (?url=encoded)', async (
         const result = await fetchSubscription('https://example.test/sub', { headers: { 'x-hwid': 'dddddddddddddddddddddddddddddddd' } });
         assert.equal(result, GOOD);
         const last = seen[seen.length - 1];
-        assert.match(last.url, /^https:\/\/sub\.web2core\.workers\.dev\/\?url=https%3A%2F%2Fexample\.test%2Fsub$/);
+        assert.match(last.url, /^https:\/\/sub\.saymer-87\.workers\.dev\/\?url=https%3A%2F%2Fexample\.test%2Fsub$/);
         assert.equal(last.method, 'GET');
     });
 });
@@ -140,7 +140,7 @@ test('POST fallback carries the same HWID across worker retries', async () => {
     const posts = [];
     let postCalls = 0;
     await withFetch(async (url, init) => {
-        if (String(url).startsWith('https://sub.web2core.workers.dev/') && init.method === 'POST') {
+        if (String(url).startsWith('https://sub.saymer-87.workers.dev/') && init.method === 'POST') {
             postCalls++;
             const body = JSON.parse(init.body);
             posts.push(body.headers['x-hwid']);

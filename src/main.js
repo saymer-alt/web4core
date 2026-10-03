@@ -137,8 +137,13 @@ const FETCH_INIT = {
     headers: { 'Accept': 'text/plain, */*' },
     redirect: 'follow'
 };
+// Production CORS fallback — наш собственный worker (sub, workers/subscription),
+// деплоится GitHub Actions (deploy-subscription-worker.yml), поддерживает
+// POST JSON контракт с device headers. Старый legacy GET-only endpoint
+// (sub.web2core.workers.dev) — чужая инфраструктура без поддержки device
+// headers и POST; как production dependency не используется.
 const PUBLIC_CORS_FALLBACKS = [
-    (x) => 'https://sub.web2core.workers.dev/?url=' + encodeURIComponent(x)
+    (x) => 'https://sub.saymer-87.workers.dev/?url=' + encodeURIComponent(x)
 ];
 
 const CORE_PROTOCOL_SUPPORT = {
