@@ -185,3 +185,50 @@ test('OPTIONS preflight answered without touching the upstream', async () => {
     assert.equal(resp.status, 204);
     assert.equal(resp.headers.get('Access-Control-Allow-Origin'), '*');
 });
+
+test('upstream 4xx status passes through, body empty, headers standard', async () => {
+    for (const status of [401, 403, 404]) {
+        const req = jsonRequest({ url: UPSTREAM, headers: {} });
+        const resp = await callWorker(req, async () => new Response('sensitive error detail', { status }));
+        assert.equal(resp.status, status, 'upstream status preserved: ' + status);
+        const body = await resp.text();
+        assert.equal(body, '', 'error body NOT passed to client');
+        assert.ok(!body.includes('sensitive'), 'no sensitive body leak');
+        assert.ok(resp.headers.get('cache-control')?.includes('no-store'), 'no-store preserved');
+    }
+});
+
+test('upstream 5xx status passes through, body empty', async () => {
+    for (const status of [500, 502, 503]) {
+        const req = jsonRequest({ url: UPSTREAM, headers: {} });
+        const resp = await callWorker(req, async () => new Response('internal detail with secrets', { status }));
+        assert.equal(resp.status, status);
+        const body = await resp.text();
+        assert.equal(body, '', '5xx body empty');
+        assert.ok(!body.includes('secrets'), 'no body leak');
+    }
+});
+
+test('overall deadline bounds the redirect chain (not per-hop)', async () => {
+    // Каждый хоп занимает 8 секунд; общий deadline 15s → abort после 2-го хопа
+    // (не после 5-го, как было бы при per-hop timeout). Mock уважает signal.
+    const req = jsonRequest({ url: UPSTREAM, headers: {} });
+    let hops = 0;
+    const resp = await callWorker(req, async (_target, init) => {
+        hops++;
+        return new Promise((resolve, reject) => {
+            const timer = setTimeout(() => resolve(new Response(null, { status: 302, headers: { Location: UPSTREAM + '?hop=' + hops } })), 8000);
+            init.signal?.addEventListener('abort', () => { clearTimeout(timer); reject(new DOMException('aborted', 'AbortError')); });
+        });
+    });
+    assert.equal(resp.status, 502, 'overall deadline exceeded → 502');
+    assert.ok(hops <= 2, 'bounded by shared deadline: only ' + hops + ' hops (not 5)');
+    assert.equal(await resp.text(), 'Upstream fetch failed');
+});
+
+test('normal single request with POST identity unaffected by deadline change', async () => {
+    const req = jsonRequest({ url: UPSTREAM, headers: { 'x-hwid': 'test', 'x-device-model': 'Test' } });
+    const resp = await callWorker(req, async () => new Response('fast-ok', { status: 200 }));
+    assert.equal(resp.status, 200);
+    assert.equal(await resp.text(), 'fast-ok');
+});

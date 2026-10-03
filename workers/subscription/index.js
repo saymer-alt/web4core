@@ -45,36 +45,30 @@ function collectForwardHeaders(rawHeaders) {
     return out;
 }
 
-async function fetchUpstream(target, forwardHeaders) {
+async function fetchUpstream(target, forwardHeaders, deadline) {
     // redirect: "manual" — HTTP redirect chain ограничивается resolveUpstream
     // (MAX_REDIRECTS + повторная http(s)-валидация каждого хопа);
     // "follow" обошёл бы лимит внутри самого fetch.
-    let response;
-    if (forwardHeaders && Object.keys(forwardHeaders).length) {
-        response = await fetch(target, {
-            method: "GET",
-            redirect: "manual",
-            headers: {
+    // deadline — общий AbortSignal на всю цепочку (не per-hop).
+    const opts = {
+        method: "GET",
+        redirect: "manual",
+        headers: forwardHeaders && Object.keys(forwardHeaders).length
+            ? {
                 "User-Agent": "curl/8.7.1",
                 "Accept": "*/*",
                 "Accept-Encoding": "identity",
                 ...forwardHeaders
-            },
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
-        });
-    } else {
-        response = await fetch(target, {
-            method: "GET",
-            redirect: "manual",
-            headers: {
+            }
+            : {
                 "User-Agent": "curl/8.7.1",
                 "Accept": "*/*",
                 "Accept-Encoding": "identity",
                 "Connection": "close"
             },
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
-        });
-    }
+        signal: deadline
+    };
+    const response = await fetch(target, opts);
     // Bound the response size: read at most MAX_RESPONSE_BYTES, then stop.
     if (!response.ok || !response.body) {
         return new Response(null, { status: response.status, headers: response.headers });
@@ -111,9 +105,12 @@ async function resolveUpstream(target, forwardHeaders) {
     // Ручной redirect-chain: каждый хоп валидируется заново (http/https only,
     // относительный Location разрешается от текущего URL), лимит hops —
     // MAX_REDIRECTS, ошибки — generic, без эха полного target URL.
+    // Один общий bounded deadline на всю цепочку (не per-hop): redirects
+    // расходуют оставшийся бюджет, общий worst case = UPSTREAM_TIMEOUT_MS.
+    const deadline = AbortSignal.timeout(UPSTREAM_TIMEOUT_MS);
     let current = target;
     for (let i = 0; i <= MAX_REDIRECTS; i++) {
-        const response = await fetchUpstream(current, forwardHeaders);
+        const response = await fetchUpstream(current, forwardHeaders, deadline);
         if (isRedirect(response.status)) {
             const location = response.headers.get("Location");
             if (!location) return textResponse("Upstream redirect without Location", 502);
