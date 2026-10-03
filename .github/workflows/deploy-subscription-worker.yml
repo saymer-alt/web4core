@@ -57,7 +57,10 @@ jobs:
       - name: Worker syntax check
         run: node --check workers/subscription/index.js
 
+      # Deploy ТОЛЬКО по явному workflow_dispatch. Push-прогон (регистрация
+      # workflow) останавливается здесь с ясным сообщением, не касаясь Cloudflare.
       - name: Deploy subscription worker with Wrangler
+        if: github.event_name == 'workflow_dispatch'
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -65,3 +68,8 @@ jobs:
           workingDirectory: workers/subscription
           wranglerVersion: '4.54.0'
           command: deploy
+
+      - name: Skipped on push (registration run)
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          echo 'Registration/validation run: deploy выполняется только через workflow_dispatch.'
