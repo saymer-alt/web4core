@@ -105,10 +105,16 @@ jobs:
             -H 'Content-Type: application/json' \
             -d '{"url":"https://httpbin.org/headers","headers":{"x-hwid":"ffffffffffffffffffffffffffffffff","x-device-model":"Smoke","Authorization":"Bearer X","Cookie":"s=1","x-device-os":"web","x-ver-os":"x","X-Test":"y"}}' \
             --max-time 40)
-          echo "$body" | grep -qi 'ffffffffffffffffffffffffffffffff'
-          echo "$body" | grep -qi 'Saymer CI Smoke'
-          if echo "$body" | grep -qi 'Bearer X'; then echo 'arbitrary header leaked'; exit 1; fi
-          if echo "$body" | grep -qi '"Cookie"'; then echo 'cookie leaked'; exit 1; fi
+          # jq precise checks: only allowlisted headers forwarded
+          hwid=$(echo "$body" | jq -r '.headers["X-Hwid"] // empty')
+          model=$(echo "$body" | jq -r '.headers["X-Device-Model"] // empty')
+          test "$hwid" = 'ffffffffffffffffffffffffffffffff'
+          test "$model" = 'Smoke'
+          echo "$body" | jq -e '.headers | has("Authorization")' > /dev/null 2>&1 && { echo 'LEAK: Authorization'; exit 1; } || true
+          echo "$body" | jq -e '.headers | has("Cookie")' > /dev/null 2>&1 && { echo 'LEAK: Cookie'; exit 1; } || true
+          echo "$body" | jq -e '.headers | has("X-Device-Os")' > /dev/null 2>&1 && { echo 'LEAK: X-Device-Os'; exit 1; } || true
+          echo "$body" | jq -e '.headers | has("X-Ver-Os")' > /dev/null 2>&1 && { echo 'LEAK: X-Ver-Os'; exit 1; } || true
+          echo "$body" | jq -e '.headers | has("X-Test")' > /dev/null 2>&1 && { echo 'LEAK: X-Test'; exit 1; } || true
 
       - name: Redirect follows (1 hop)
         shell: bash
