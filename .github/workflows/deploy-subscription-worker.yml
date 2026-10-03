@@ -1,10 +1,12 @@
-# Manual deploy для production subscription worker (sub.web2core.workers.dev).
+# Manual deploy + production smoke для subscription worker (sub.saymer-87.workers.dev).
 # Отдельный workflow: деплоит только workers/subscription из опубликованной
-# ветки web4core:link-generators. Никаких deploy на push; никакой OAuth —
-# используется тот же Cloudflare secrets contract, что у deploy-worker-api
-# в build.yml (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID).
+# ветки web4core:link-generators. Использует тот же Cloudflare secrets
+# contract, что и deploy-worker-api в build.yml
+# (CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID).
 # Worker обрабатывает чувствительные подписочные URL/заголовки — observability
-# и логирование не включаются; секреты в логи не печатаются.
+# и логирование не включаются; секреты/URL в логи не печатаются.
+# Deploy только по явному workflow_dispatch; после успешного deploy
+# выполняется synthetic smoke (без реальных subscription credentials).
 name: Deploy subscription worker
 
 on:
@@ -15,14 +17,6 @@ on:
         required: false
         default: 'link-generators'
         type: string
-  # Регистрация workflow в GitHub: workflow_dispatch доступен только после
-  # первого event. Push-триггер ограничен самим workflow-файлом (paths) и
-  # запускает только валидацию без deploy — deploy всегда ручной.
-  push:
-    branches:
-      - link-generators
-    paths:
-      - '.github/workflows/deploy-subscription-worker.yml'
 
 permissions:
   contents: read
@@ -33,7 +27,7 @@ concurrency:
 
 jobs:
   deploy-sub:
-    name: deploy sub.web2core.workers.dev
+    name: deploy sub.saymer-87.workers.dev
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -44,6 +38,7 @@ jobs:
           persist-credentials: false
 
       - name: Record deployed source revision
+        shell: bash
         run: |
           echo "Deploying source commit: $(git rev-parse HEAD)"
 
@@ -57,10 +52,8 @@ jobs:
       - name: Worker syntax check
         run: node --check workers/subscription/index.js
 
-      # Deploy ТОЛЬКО по явному workflow_dispatch. Push-прогон (регистрация
-      # workflow) останавливается здесь с ясным сообщением, не касаясь Cloudflare.
       - name: Deploy subscription worker with Wrangler
-        if: github.event_name == 'workflow_dispatch'
+        id: deploy
         uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -69,7 +62,90 @@ jobs:
           wranglerVersion: '4.54.0'
           command: deploy
 
-      - name: Skipped on push (registration run)
-        if: github.event_name != 'workflow_dispatch'
+  production-smoke:
+    name: production smoke (synthetic, no real credentials)
+    needs: deploy-sub
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: OPTIONS/CORS
+        shell: bash
         run: |
-          echo 'Registration/validation run: deploy выполняется только через workflow_dispatch.'
+          set -euo pipefail
+          hdrs=$(curl -s -i -X OPTIONS 'https://sub.saymer-87.workers.dev/' --max-time 20)
+          echo "$hdrs" | grep -qi 'HTTP/.* 204'
+          echo "$hdrs" | grep -qi 'access-control-allow-origin: \*'
+          echo "$hdrs" | grep -qi 'access-control-allow-methods:.*GET.*POST.*OPTIONS'
+          echo "$hdrs" | grep -qi 'access-control-allow-headers:.*Content-Type'
+
+      - name: Legacy GET (no device headers forwarded, no-store)
+        shell: bash
+        run: |
+          set -euo pipefail
+          hdrs=$(curl -s -D - 'https://sub.saymer-87.workers.dev/?url=https%3A%2F%2Fhttpbin.org%2Fheaders' --max-time 40 -o /dev/null)
+          echo "$hdrs" | grep -qi 'cache-control: no-store'
+          echo "$hdrs" | grep -qi 'access-control-allow-origin: \*'
+
+      - name: POST identity forwarded
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(curl -s -X POST 'https://sub.saymer-87.workers.dev/' \
+            -H 'Content-Type: application/json' \
+            -d '{"url":"https://httpbin.org/headers","headers":{"x-hwid":"0123456789abcdef0123456789abcdef","x-device-model":"Saymer CI Smoke"}}' \
+            --max-time 40)
+          echo "$body" | grep -qi '0123456789abcdef0123456789abcdef'
+          echo "$body" | grep -qi 'Saymer CI Smoke'
+
+      - name: Header allowlist (arbitrary headers rejected)
+        shell: bash
+        run: |
+          set -euo pipefail
+          body=$(curl -s -X POST 'https://sub.saymer-87.workers.dev/' \
+            -H 'Content-Type: application/json' \
+            -d '{"url":"https://httpbin.org/headers","headers":{"x-hwid":"ffffffffffffffffffffffffffffffff","x-device-model":"Smoke","Authorization":"Bearer X","Cookie":"s=1","x-device-os":"web","x-ver-os":"x","X-Test":"y"}}' \
+            --max-time 40)
+          echo "$body" | grep -qi 'ffffffffffffffffffffffffffffffff'
+          echo "$body" | grep -qi 'Saymer CI Smoke'
+          if echo "$body" | grep -qi 'Bearer X'; then echo 'arbitrary header leaked'; exit 1; fi
+          if echo "$body" | grep -qi '"Cookie"'; then echo 'cookie leaked'; exit 1; fi
+
+      - name: Redirect follows (1 hop)
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST 'https://sub.saymer-87.workers.dev/' \
+            -H 'Content-Type: application/json' \
+            -d '{"url":"https://httpbin.org/redirect/1"}' \
+            --max-time 40)
+          test "$code" = 200
+
+      - name: Redirect limit (508 bounded)
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST 'https://sub.saymer-87.workers.dev/' \
+            -H 'Content-Type: application/json' \
+            -d '{"url":"https://httpbin.org/redirect/8"}' \
+            --max-time 60)
+          test "$code" = 508
+
+      - name: Non-http(s) rejected (target)
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST 'https://sub.saymer-87.workers.dev/' \
+            -H 'Content-Type: application/json' \
+            -d '{"url":"file:///etc/passwd"}' \
+            --max-time 30)
+          test "$code" = 400
+
+      - name: Invalid JSON rejected
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -s -o /dev/null -w '%{http_code}' -X POST 'https://sub.saymer-87.workers.dev/' \
+            -H 'Content-Type: application/json' \
+            --data-raw '{not json' \
+            --max-time 30)
+          test "$code" = 400
