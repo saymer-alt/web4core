@@ -62,11 +62,6 @@ jobs:
           wranglerVersion: '4.54.0'
           command: deploy
 
-      - name: List production deployments
-        run: |
-          echo '--- Production deployments for worker sub ---'
-          npx wrangler deployments list --name sub 2>&1 || echo 'deployments list not available in this wrangler version'
-
   production-smoke:
     name: production smoke (synthetic, no real credentials)
     needs: deploy-sub
