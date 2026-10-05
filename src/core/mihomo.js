@@ -1,4 +1,5 @@
 import { computeTag, validateBean, PROXY_FETCH_INTERVAL, SUB_REFRESH_INTERVAL, resolveUrlTest, resolveUrlTestExpectedStatus, generateSecretHex32 } from '../main.js';
+import { normalizeWireGuardIpv4Only } from './wireguard.js';
 
 const FASTEST_GROUP_NAME = '⚡ Fastest';
 const GLOBAL_GROUP_NAME = 'GLOBAL';
@@ -686,7 +687,10 @@ function buildMihomoProxy(bean) {
     }
     if (bean.proto === 'wireguard') {
         const wg = bean.wireguard || {};
-        const peers = Array.isArray(wg.peers) ? wg.peers : [];
+        // IPv4-only contract (link-generators v1.8.0): нормализация на build-слое,
+        // парсер остаётся faithful. IPv6 interface-адрес и IPv6 allowed-ips не эмитятся.
+        const ipv4 = normalizeWireGuardIpv4Only(wg);
+        const peers = Array.isArray(ipv4.peers) ? ipv4.peers : [];
         const hasPeers = peers.length > 0;
         const mapPeer = (peer) => {
             if (!peer || typeof peer !== 'object') return null;
@@ -705,11 +709,10 @@ function buildMihomoProxy(bean) {
             'private-key': wg.privateKey,
             udp: true,
         };
-        if (wg.ip) p.ip = wg.ip;
-        if (wg.ipv6) p.ipv6 = wg.ipv6;
+        if (ipv4.ip) p.ip = ipv4.ip;
         if (wg.publicKey) p['public-key'] = wg.publicKey;
         if (wg.preSharedKey) p['pre-shared-key'] = wg.preSharedKey;
-        if (Array.isArray(wg.allowedIPs) && wg.allowedIPs.length) p['allowed-ips'] = wg.allowedIPs;
+        if (Array.isArray(ipv4.allowedIPs) && ipv4.allowedIPs.length) p['allowed-ips'] = ipv4.allowedIPs;
         if (Number.isFinite(wg.mtu)) p.mtu = wg.mtu;
         if (Number.isFinite(wg.persistentKeepalive) && wg.persistentKeepalive > 0) p['persistent-keepalive'] = wg.persistentKeepalive;
         if (wg.reserved !== undefined) p.reserved = wg.reserved;

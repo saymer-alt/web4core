@@ -206,6 +206,165 @@ function parseWireGuardConf(confText, nameHint) {
     return bean;
 }
 
+// IPv4-only contract (link-generators v1.8.0): нормализация выполняется на
+// build-слое, парсер остаётся faithful к исходному файлу. Убирается только IPv6:
+// interface-адрес ::, allowed-ips с ':' (включая ::/0), поле ipv6. IPv4 не трогается.
+function isIpv6AddrEntry(entry) {
+    return String(entry || '').includes(':');
+}
+
+function normalizeWireGuardIpv4Only(wg) {
+    const src = wg && typeof wg === 'object' ? wg : {};
+    const allowedIPs = Array.isArray(src.allowedIPs)
+        ? src.allowedIPs.filter(x => !isIpv6AddrEntry(x))
+        : src.allowedIPs;
+    const peers = Array.isArray(src.peers)
+        ? src.peers.map(peer => {
+            if (!peer || typeof peer !== 'object') return peer;
+            const filtered = Array.isArray(peer.allowedIPs) ? peer.allowedIPs.filter(x => !isIpv6AddrEntry(x)) : peer.allowedIPs;
+            return Object.assign({}, peer, { allowedIPs: filtered });
+        })
+        : src.peers;
+    const ipv6RemovedCount = (Array.isArray(src.allowedIPs) ? src.allowedIPs.length - (Array.isArray(allowedIPs) ? allowedIPs.length : 0) : 0)
+        + (Array.isArray(src.peers) ? src.peers.reduce((acc, peer) => acc + (Array.isArray(peer && peer.allowedIPs) ? peer.allowedIPs.filter(x => isIpv6AddrEntry(x)).length : 0), 0) : 0);
+    return {
+        ip: src.ip || '',
+        ipv6: '', // contract: IPv6 interface address never emitted
+        allowedIPs,
+        peers,
+        dns: Array.isArray(src.dns) ? src.dns.filter(x => !isIpv6AddrEntry(x)) : src.dns,
+        ipv6Removed: !!src.ipv6 || ipv6RemovedCount > 0 || (Array.isArray(src.dns) && src.dns.some(x => isIpv6AddrEntry(x))),
+        ipv6RemovedCount
+    };
+}
+
+// Размер (в байтах) I-tag последовательности AmneziaWG. Синтаксис тегов
+// воспроизводит device_v1/awg (v1.5) и device/obf* (v3) amneziawg-go:
+//   <b 0xHEX> — hex-байты; <r N>/<rc N>/<rd N> — N случайных байт/ASCII/цифр;
+//   <t> — 8-байтовый timestamp; <c> — 8-байтовый счётчик;
+//   <wt N>/<wr N> — wait-теги, байт не добавляют; <d>/<ds>/<dz N> — data-теги v3.
+// Возвращает { size, unknown: [теги] } — точный размер, если все теги известны.
+function computeAmneziaTagJunkSize(spec) {
+    const input = String(spec || '');
+    const tags = input.match(/<[^<>]*>/g) || [];
+    let size = 0;
+    const unknown = [];
+    for (const raw of tags) {
+        const m = raw.slice(1, -1).match(/^([a-zA-Z]+)(?:\s+(.*?))?$/);
+        if (!m) { unknown.push(raw); continue; }
+        const tag = m[1];
+        const param = (m[2] || '').trim();
+        const n = /^\d+$/.test(param) ? parseInt(param, 10) : null;
+        if (tag === 'b') {
+            const hex = param.replace(/^0x/i, '').replace(/\s+/g, '');
+            size += /^[0-9a-fA-F]+$/.test(hex) ? Math.floor(hex.length / 2) : 0;
+            if (!/^[0-9a-fA-F]+$/.test(hex)) unknown.push(raw);
+        } else if ((tag === 'r' || tag === 'rc' || tag === 'rd') && n !== null) {
+            size += n;
+        } else if (tag === 't' || tag === 'c') {
+            size += (n !== null && n > 0) ? n : 8;
+        } else if (tag === 'wt' || tag === 'wr' || tag === 'd' || tag === 'ds') {
+            // wait-теги и data-теги байт в пакет не добавляют
+        } else if (tag === 'dz' && n !== null) {
+            size += n;
+        } else {
+            unknown.push(raw);
+        }
+    }
+    if (!tags.length) unknown.push(input);
+    return { size, unknown };
+}
+
+// Диагностика профиля WG/AWG для UI: imported/effective MTU, следы IPv6-нормализации
+// и классификация AWG-параметров. Только чтение; effectiveMtu в v1.8.0 НИКОГДА не
+// больше importedMtu (auto-change не выполняется — см. ROADMAP про PoC-гейт).
+// Default 1408 — source-pinned: MetaCubeX/mihomo adapter/outbound/wireguard.go
+// (`if mtu == 0 { mtu = 1408 }`), теги v1.19.31 == v1.19.32.
+function analyzeWireGuardProfile(bean) {
+    const wg = bean && bean.wireguard && typeof bean.wireguard === 'object' ? bean.wireguard : {};
+    const norm = normalizeWireGuardIpv4Only(wg);
+    const importedMtu = Number.isFinite(wg.mtu) && wg.mtu > 0 ? wg.mtu : null;
+    const notes = [];
+    const awg = wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object' ? wg['amnezia-wg-option'] : {};
+    const num = v => (Number.isFinite(v) ? v : (/^\d+$/.test(String(v || '')) ? parseInt(v, 10) : null));
+
+    if (norm.ipv6Removed) {
+        notes.push({ level: 'info', text: 'IPv6 detected in imported WG/AWG profile. Removed by link-generators IPv4-only contract.' });
+    }
+    if (importedMtu === null) {
+        notes.push({ level: 'info', text: 'MTU в конфиге не задан — Mihomo применит default 1408.' });
+    }
+
+    const s4 = num(awg.s4);
+    if (s4 !== null && s4 > 0) {
+        notes.push({ level: 'info', text: 'AWG S4 = ' + s4 + ': junk добавляется к каждому transport-пакету (пер-пакетный overhead).' });
+    }
+    const cpRaw = String(awg['content-padding-addition'] || '').trim();
+    if (cpRaw) {
+        const range = cpRaw.match(/^(\d+)-(\d+)$/);
+        const maxPad = range ? parseInt(range[2], 10) : num(cpRaw);
+        if (maxPad !== null && maxPad > 0) {
+            notes.push({ level: 'info', text: 'AWG ContentPaddingAddition = ' + cpRaw + ': пер-пакетный padding, worst-case +' + maxPad + ' байт учтён в диагностике.' });
+        } else {
+            notes.push({ level: 'warn', text: 'AWG ContentPaddingAddition="' + cpRaw + '": формат не распознан, точный overhead не вычислить.' });
+        }
+    }
+    if (awg['random-trailers'] === true) {
+        notes.push({ level: 'warn', text: 'AWG RandomTrailers включён: случайные хвосты ограничены внутренним окном реализации (DefaultUdpWindow=500 в amneziawg-go), строгая верхняя граница из конфига не выводится.' });
+    }
+    const jmax = num(awg.jmax);
+    const jc = num(awg.jc);
+    if (jc !== null && jc > 0 && jmax !== null && jmax > 1408) {
+        notes.push({ level: 'warn', text: 'AWG Jmax = ' + jmax + ' превышает default transport-бюджет 1408: junk-пакеты отдельные и могут фрагментироваться на path MTU.' });
+    }
+    const iSizes = [];
+    for (const key of ['i1', 'i2', 'i3', 'i4', 'i5']) {
+        const spec = awg[key];
+        if (!spec) continue;
+        const calc = computeAmneziaTagJunkSize(spec);
+        iSizes.push({ key: key.toUpperCase(), size: calc.unknown.length ? null : calc.size, unknown: calc.unknown });
+    }
+    for (const i of iSizes) {
+        if (i.size === null) {
+            notes.push({ level: 'warn', text: 'AWG ' + i.key + ': не все теги распознаны, размер signature-пакета не вычислить точно.' });
+        } else if (i.size > 1408) {
+            notes.push({ level: 'warn', text: 'AWG ' + i.key + ' = ' + i.size + ' B превышает default transport-бюджет 1408: signature-пакет отдельный и может фрагментироваться.' });
+        } else if (i.size > 0) {
+            notes.push({ level: 'info', text: 'AWG ' + i.key + ': signature-пакет ' + i.size + ' B (отдельный, при handshake).' });
+        }
+    }
+    const handshakeOnly = ['s1', 's2', 's3'].filter(k => num(awg[k]) > 0);
+    if (handshakeOnly.length) {
+        notes.push({ level: 'info', text: 'AWG ' + handshakeOnly.map(k => k.toUpperCase()).join('/') + ': junk только в handshake-пакетах, на transport MTU не влияет.' });
+    }
+    const headerTags = ['h1', 'h2', 'h3', 'h4'].filter(k => awg[k] !== undefined && awg[k] !== '');
+    if (headerTags.length) {
+        notes.push({ level: 'info', text: 'AWG ' + headerTags.map(k => k.toUpperCase()).join('/') + ': заменяют тип сообщения (байты), длину пакетов не меняют.' });
+    }
+
+    return {
+        importedMtu,
+        effectiveMtu: importedMtu, // v1.8.0: auto-correction не выполняется (PoC-гейт не пройден)
+        mtuSource: importedMtu !== null ? 'imported' : 'engine-default',
+        engineDefaultMtu: 1408,
+        ipv6Removed: norm.ipv6Removed,
+        ipv6RemovedCount: norm.ipv6RemovedCount,
+        notes,
+        awg: {
+            version: awg.version !== undefined ? awg.version : null,
+            s4: s4 !== null ? s4 : 0,
+            contentPaddingAddition: cpRaw || null,
+            randomTrailers: awg['random-trailers'] === true,
+            junkPacketCount: jc !== null ? jc : 0,
+            junkPacketMaxSize: jmax !== null ? jmax : 0,
+            iSizes
+        }
+    };
+}
+
 export {
     parseWireGuardConf,
+    normalizeWireGuardIpv4Only,
+    computeAmneziaTagJunkSize,
+    analyzeWireGuardProfile,
 };
