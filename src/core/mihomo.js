@@ -1,5 +1,5 @@
 import { computeTag, validateBean, PROXY_FETCH_INTERVAL, SUB_REFRESH_INTERVAL, resolveUrlTest, resolveUrlTestExpectedStatus, generateSecretHex32 } from '../main.js';
-import { normalizeWireGuardIpv4Only } from './wireguard.js';
+import { normalizeWireGuardIpv4Only, validateWireGuardIpv4Only } from './wireguard.js';
 
 const FASTEST_GROUP_NAME = '⚡ Fastest';
 const GLOBAL_GROUP_NAME = 'GLOBAL';
@@ -688,7 +688,10 @@ function buildMihomoProxy(bean) {
     if (bean.proto === 'wireguard') {
         const wg = bean.wireguard || {};
         // IPv4-only contract (link-generators v1.8.0): нормализация на build-слое,
-        // парсер остаётся faithful. IPv6 interface-адрес и IPv6 allowed-ips не эмитятся.
+        // парсер остаётся faithful. Жёсткая часть — reject вместо молчаливой порчи:
+        // IPv6-only interface address и IPv6 literal endpoint несовместимы с контрактом.
+        const validation = validateWireGuardIpv4Only(bean);
+        if (!validation.ok) throw new Error(validation.reason);
         const ipv4 = normalizeWireGuardIpv4Only(wg);
         const peers = Array.isArray(ipv4.peers) ? ipv4.peers : [];
         const hasPeers = peers.length > 0;
@@ -716,6 +719,10 @@ function buildMihomoProxy(bean) {
         if (Number.isFinite(wg.mtu)) p.mtu = wg.mtu;
         if (Number.isFinite(wg.persistentKeepalive) && wg.persistentKeepalive > 0) p['persistent-keepalive'] = wg.persistentKeepalive;
         if (wg.reserved !== undefined) p.reserved = wg.reserved;
+        // Контракт: endpoint-транспорт WG/AWG всегда резолвится в IPv4
+        // (hostname не должен молча уйти в AAAA; applyCommon ниже не перезапишет —
+        // bean.ipVersion у dual-stack пуст после нормализации интерфейса).
+        p['ip-version'] = 'ipv4';
                 // Per-profile dialer assignment (consumer sets it from the profile's
                 // connection mode). Global wgDialerProxy stamping never overwrites it.
                 if (typeof wg.dialerProxy === 'string' && wg.dialerProxy.trim()) p['dialer-proxy'] = wg.dialerProxy.trim();

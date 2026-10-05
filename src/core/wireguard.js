@@ -225,17 +225,55 @@ function normalizeWireGuardIpv4Only(wg) {
             return Object.assign({}, peer, { allowedIPs: filtered });
         })
         : src.peers;
-    const ipv6RemovedCount = (Array.isArray(src.allowedIPs) ? src.allowedIPs.length - (Array.isArray(allowedIPs) ? allowedIPs.length : 0) : 0)
-        + (Array.isArray(src.peers) ? src.peers.reduce((acc, peer) => acc + (Array.isArray(peer && peer.allowedIPs) ? peer.allowedIPs.filter(x => isIpv6AddrEntry(x)).length : 0), 0) : 0);
+    const dns = Array.isArray(src.dns) ? src.dns.filter(x => !isIpv6AddrEntry(x)) : src.dns;
+    const removed = {
+        addresses: isIpv6AddrEntry(src.ipv6) ? 1 : 0,
+        allowedIps: (Array.isArray(src.allowedIPs) ? src.allowedIPs.filter(x => isIpv6AddrEntry(x)).length : 0)
+            + (Array.isArray(src.peers) ? src.peers.reduce((acc, peer) => acc + (Array.isArray(peer && peer.allowedIPs) ? peer.allowedIPs.filter(x => isIpv6AddrEntry(x)).length : 0), 0) : 0),
+        dns: (Array.isArray(src.dns) ? src.dns.filter(x => isIpv6AddrEntry(x)).length : 0),
+    };
     return {
         ip: src.ip || '',
         ipv6: '', // contract: IPv6 interface address never emitted
         allowedIPs,
         peers,
-        dns: Array.isArray(src.dns) ? src.dns.filter(x => !isIpv6AddrEntry(x)) : src.dns,
-        ipv6Removed: !!src.ipv6 || ipv6RemovedCount > 0 || (Array.isArray(src.dns) && src.dns.some(x => isIpv6AddrEntry(x))),
-        ipv6RemovedCount
+        dns,
+        removed,
+        ipv6Removed: removed.addresses + removed.allowedIps + removed.dns > 0,
+        ipv6RemovedCount: removed.addresses + removed.allowedIps + removed.dns,
     };
+}
+
+// Жёсткая часть IPv4-only контракта: то, что не может быть «мягко отфильтровано».
+// Возвращает { ok, reason } — emitter обязан reject-ить профиль при !ok.
+function validateWireGuardIpv4Only(bean) {
+    const wg = bean && bean.wireguard && typeof bean.wireguard === 'object' ? bean.wireguard : {};
+    const norm = normalizeWireGuardIpv4Only(wg);
+    if (!norm.ip) {
+        return {
+            ok: false,
+            code: 'WG_IPV6_ONLY_ADDRESS',
+            reason: 'wireguard: profile has only an IPv6 interface address; link-generators emits IPv4-only WireGuard and requires an IPv4 Address',
+        };
+    }
+    const isV6 = (s) => String(s || '').includes(':');
+    if (isV6(bean.host)) {
+        return {
+            ok: false,
+            code: 'WG_IPV6_ENDPOINT',
+            reason: 'wireguard: IPv6 literal endpoint "' + bean.host + '" is not allowed in IPv4-only output; use an IPv4 endpoint or a hostname',
+        };
+    }
+    const peers = Array.isArray(norm.peers) ? norm.peers : [];
+    const v6Peer = peers.findIndex(p => p && isV6(p.server));
+    if (v6Peer !== -1) {
+        return {
+            ok: false,
+            code: 'WG_IPV6_ENDPOINT',
+            reason: 'wireguard: peer #' + (v6Peer + 1) + ' has an IPv6 literal endpoint; IPv4-only output requires IPv4 endpoints or hostnames',
+        };
+    }
+    return { ok: true, code: null, reason: null };
 }
 
 // Размер (в байтах) I-tag последовательности AmneziaWG. Синтаксис тегов
@@ -349,6 +387,12 @@ function analyzeWireGuardProfile(bean) {
         engineDefaultMtu: 1408,
         ipv6Removed: norm.ipv6Removed,
         ipv6RemovedCount: norm.ipv6RemovedCount,
+        removed: norm.removed,
+        ipv6OnlyAddress: !norm.ip,
+        ipv6LiteralEndpoints: [
+            ...(isIpv6AddrEntry(bean.host) ? ['primary'] : []),
+            ...((Array.isArray(norm.peers) ? norm.peers : []).map((p, i) => (p && isIpv6AddrEntry(p.server) ? 'peer #' + (i + 1) : null)).filter(Boolean)),
+        ],
         notes,
         awg: {
             version: awg.version !== undefined ? awg.version : null,
@@ -365,6 +409,7 @@ function analyzeWireGuardProfile(bean) {
 export {
     parseWireGuardConf,
     normalizeWireGuardIpv4Only,
+    validateWireGuardIpv4Only,
     computeAmneziaTagJunkSize,
     analyzeWireGuardProfile,
 };

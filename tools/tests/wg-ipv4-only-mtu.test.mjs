@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { parseWireGuardConf, normalizeWireGuardIpv4Only, computeAmneziaTagJunkSize, analyzeWireGuardProfile } from '../../src/core/wireguard.js';
+import { parseWireGuardConf, normalizeWireGuardIpv4Only, validateWireGuardIpv4Only, computeAmneziaTagJunkSize, analyzeWireGuardProfile } from '../../src/core/wireguard.js';
 import { buildMihomoProxy } from '../../src/core/mihomo.js';
 
 const dualStackConf = [
@@ -135,4 +135,49 @@ test('AWG diagnostics: random-trailers warns about no config-derived bound; I-si
   assert.ok(info.notes.some(n => n.text.includes('ContentPaddingAddition = 10-100') && n.text.includes('100')));
   const i1 = info.awg.iSizes.find(x => x.key === 'I1');
   assert.equal(i1.size, 59 + 13 + 8 + 54); // b-блоб 118 hex = 59 B
+});
+
+test('IPv6-only profile: hard rejection with clear reason (no silent half-working proxy)', () => {
+  const conf = ['[Interface]', 'PrivateKey = CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', 'Address = fd00::2/128', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = ::/0', 'Endpoint = [2001:db8::10]:51820'].join(String.fromCharCode(10));
+  const bean = parseWireGuardConf(conf, 'v6only.conf');
+  const v = validateWireGuardIpv4Only(bean);
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'WG_IPV6_ONLY_ADDRESS');
+  assert.match(v.reason, /IPv4 Address/);
+  assert.throws(() => buildMihomoProxy(bean, new Set()), /IPv6 interface address/, 'emitter reject-ит');
+  const info = analyzeWireGuardProfile(bean);
+  assert.equal(info.ipv6OnlyAddress, true);
+});
+
+test('IPv6 literal endpoint: hard rejection (primary and peer)', () => {
+  const conf1 = ['[Interface]', 'PrivateKey = CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', 'Address = 10.0.0.2/32', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = 0.0.0.0/0', 'Endpoint = [2001:db8::10]:51820'].join(String.fromCharCode(10));
+  const primary = parseWireGuardConf(conf1, 'v6ep.conf');
+  const v1 = validateWireGuardIpv4Only(primary);
+  assert.equal(v1.code, 'WG_IPV6_ENDPOINT');
+  assert.match(v1.reason, /2001:db8::10/);
+  assert.throws(() => buildMihomoProxy(primary, new Set()), /IPv6 literal endpoint/);
+
+  const conf2 = ['[Interface]', 'PrivateKey = CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', 'Address = 10.0.0.2/32', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = 0.0.0.0/0', 'Endpoint = 198.51.100.10:51820', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = 0.0.0.0/0', 'Endpoint = [2001:db8::11]:51820'].join(String.fromCharCode(10));
+  const multi = parseWireGuardConf(conf2, 'multi.conf');
+  const v2 = validateWireGuardIpv4Only(multi);
+  assert.equal(v2.code, 'WG_IPV6_ENDPOINT');
+  assert.match(v2.reason, /peer #2/);
+});
+
+test('ip-version pinned to ipv4 for all WG/AWG output (hostname AAAA protection)', () => {
+  const bean = parseWireGuardConf(dualStackConf, 'warp.conf');
+  const p = buildMihomoProxy(bean, new Set());
+  assert.equal(p['ip-version'], 'ipv4', 'dual-stack normalized output pins ipv4');
+  const conf4 = ['[Interface]', 'PrivateKey = CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', 'Address = 10.0.0.2/32', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = 0.0.0.0/0', 'Endpoint = wg.example.com:51820'].join(String.fromCharCode(10));
+  const bean4 = parseWireGuardConf(conf4, 'host.conf');
+  const p4 = buildMihomoProxy(bean4, new Set());
+  assert.equal(p4['ip-version'], 'ipv4', 'hostname endpoint pins ipv4 (AAAA protection)');
+  assert.equal(p4.server, 'wg.example.com');
+});
+
+test('removed diagnostics carry per-category counts', () => {
+  const bean = parseWireGuardConf(dualStackConf, 'warp.conf');
+  const info = analyzeWireGuardProfile(bean);
+  assert.deepEqual(info.removed, { addresses: 1, allowedIps: 1, dns: 1 });
+  assert.equal(info.ipv6LiteralEndpoints.length, 0);
 });
