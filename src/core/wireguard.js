@@ -406,10 +406,115 @@ function analyzeWireGuardProfile(bean) {
     };
 }
 
+// MTU chain planner — ТОЛЬКО диагностика (v1.8.0). НИКОГДА не меняет YAML/mtu:
+// auto-MTU остаётся выключенным, пока mipstack runtime и live-crypto PoC не
+// докажут модель на реальных стеках (NIGHT-02: PARTIALLY PROVEN, gVisor path).
+// Модель (NIGHT-02/03, IPv4): каждый уровень вложения добавляет
+// 32 (WG hdr+tag) + S4 + CPA-max|align(15) к inner-пакету, а транспорт
+// через dialer добавляет inner IP+UDP = 28. Направление расчёта: outermost → inner.
+// Стеки без строгой верхней границы overhead (RandomTrailers) и цепочки,
+// упирающиеся в не-WG/AWG dialer, получают confidence unknown/stopped —
+// потолок не выдаётся вовсе.
+function planWireGuardMtu(doc) {
+    const proxies = (doc && Array.isArray(doc.proxies))
+        ? doc.proxies.filter(p => p && p.type === 'wireguard' && p.name)
+        : [];
+    const byName = new Map(proxies.map(p => [p.name, p]));
+    const profiles = proxies.map(p => {
+        const awg = p['amnezia-wg-option'] && typeof p['amnezia-wg-option'] === 'object' ? p['amnezia-wg-option'] : {};
+        const num = v => (Number.isFinite(v) ? v : (/^\d+$/.test(String(v ?? '')) ? parseInt(v, 10) : null));
+        const cpaRaw = String(awg['content-padding-addition'] || '').trim();
+        const cpaRange = cpaRaw.match(/^(\d+)-(\d+)$/);
+        return {
+            name: p.name,
+            dialer: typeof p['dialer-proxy'] === 'string' && p['dialer-proxy'].trim() ? p['dialer-proxy'].trim() : null,
+            importedMtu: Number.isFinite(p.mtu) && p.mtu > 0 ? p.mtu : null,
+            s4: num(awg.s4) || 0,
+            cpaMin: cpaRange ? parseInt(cpaRange[1], 10) : (num(cpaRaw) !== null ? num(cpaRaw) : null),
+            cpaMax: cpaRange ? parseInt(cpaRange[2], 10) : (num(cpaRaw) !== null ? num(cpaRaw) : null),
+            cpaSet: !!cpaRaw,
+            rt: awg['random-trailers'] === true,
+        };
+    });
+    const byProfile = new Map(profiles.map(p => [p.name, p]));
+    const PRACTICAL_MIN = 576; // практичный минимум inner IPv4 MTU (RFC 791 min 68; 576 — sanity-уровень)
+
+    const memo = new Map();
+    const visiting = new Set();
+    function plan(name, chain) {
+        if (memo.has(name)) return memo.get(name);
+        if (visiting.has(name)) {
+            const r = { name, confidence: 'cycle', ceiling: null, effective: null, reason: ['цикл dialer-proxy — считается authoritative cycle detection при сборке'] };
+            memo.set(name, r);
+            return r;
+        }
+        visiting.add(name);
+        const pr = byProfile.get(name);
+        const r = { name, chain, confidence: 'proven', ceiling: null, effective: null, overhead: null, reason: [] };
+        if (!pr) {
+            r.confidence = 'unknown';
+            r.reason.push('профиль не найден в конфиге');
+            memo.set(name, r);
+            return r;
+        }
+        r.importedMtu = pr.importedMtu;
+        const cpaMinB = pr.cpaSet ? (pr.cpaMin ?? 0) : 0;
+        let ovhMax;
+        if (pr.cpaSet) {
+            ovhMax = 32 + pr.s4 + (pr.cpaMax ?? 0);
+        } else if (pr.rt) {
+            ovhMax = null;
+        } else {
+            ovhMax = 32 + pr.s4 + 15;
+        }
+        r.overhead = {
+            min: 32 + pr.s4 + cpaMinB,
+            max: ovhMax,
+            deterministic: pr.cpaSet || !pr.rt,
+        };
+        const dialer = pr.dialer;
+        if (!dialer) {
+            r.reason.push('outermost: транспорт — физический интерфейс');
+            r.effective = pr.importedMtu !== null ? pr.importedMtu : 1408; // 1408 — Mihomo default (source-pinned)
+            r.mtuSource = pr.importedMtu !== null ? 'imported' : 'engine-default';
+        } else if (!byProfile.has(dialer)) {
+            r.confidence = 'stopped';
+            r.reason.push('MTU chain analysis stops at non-WG/AWG dialer target «' + dialer + '»');
+            r.effective = pr.importedMtu;
+        } else {
+            const outer = plan(dialer, [name].concat(chain));
+            r.chain = outer.chain || chain;
+            if (outer.confidence !== 'proven' || outer.effective === null || ovhMax === null) {
+                r.confidence = outer.confidence !== 'proven' ? outer.confidence : 'unknown';
+                r.effective = pr.importedMtu;
+                if (ovhMax === null) r.reason.push('AWG RandomTrailers: строгая верхняя граница overhead не выводится из конфига — расчёт остановлен, исходный MTU сохранён');
+                if (outer.confidence !== 'proven') r.reason.push('внешний hop «' + dialer + '» не имеет доказанного бюджета');
+            } else {
+                // worst-case IPv4: inner_A + align(15) + 32 + S4 + CPA-max + 28 (inner IP+UDP) ≤ MTU_B
+                r.ceiling = outer.effective - (ovhMax + 15 + 28);
+                if (r.ceiling < PRACTICAL_MIN) {
+                    r.confidence = 'error';
+                    r.effective = pr.importedMtu;
+                    r.reason.push('цепочка требует MTU ' + r.ceiling + ' — ниже практичного минимума ' + PRACTICAL_MIN);
+                } else {
+                    r.effective = pr.importedMtu !== null ? Math.min(pr.importedMtu, r.ceiling) : r.ceiling;
+                    r.mtuSource = 'planned-ceiling';
+                    r.reason.push('dialer-proxy: ' + dialer, 'outer effective MTU: ' + outer.effective, 'IPv4 worst-case per hop: 60 (32 + align 15 + inner IP/UDP 28)');
+                }
+            }
+        }
+        memo.set(name, r);
+        return r;
+    }
+    const out = profiles.map(p => plan(p.name, [p.name]));
+    return { profiles: out, note: 'diagnostics-only: YAML/mtu не изменяются' };
+}
+
 export {
     parseWireGuardConf,
     normalizeWireGuardIpv4Only,
     validateWireGuardIpv4Only,
     computeAmneziaTagJunkSize,
     analyzeWireGuardProfile,
+    planWireGuardMtu,
 };

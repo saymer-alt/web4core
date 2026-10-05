@@ -14,7 +14,7 @@ import { buildXrayConfig, buildXrayOutbound } from './core/xray.js';
 import { buildMihomoPriorityConfig, buildMihomoConfig, buildMihomoProxy, buildMihomoSubscriptionConfig } from './core/mihomo.js';
 import { buildMihomoYaml, analyzeDialerGraph } from './core/yaml.js';
 import { fetchSubscription } from './core/subscription.js';
-import { parseWireGuardConf, normalizeWireGuardIpv4Only, validateWireGuardIpv4Only, computeAmneziaTagJunkSize, analyzeWireGuardProfile } from './core/wireguard.js';
+import { parseWireGuardConf, normalizeWireGuardIpv4Only, validateWireGuardIpv4Only, computeAmneziaTagJunkSize, analyzeWireGuardProfile, planWireGuardMtu } from './core/wireguard.js';
 import { buildFromRequest } from './build.js';
 
 globalThis.web4core = Object.assign({}, globalThis.web4core || {}, {
@@ -39,6 +39,7 @@ globalThis.web4core = Object.assign({}, globalThis.web4core || {}, {
   validateWireGuardIpv4Only,
   computeAmneziaTagJunkSize,
   analyzeWireGuardProfile,
+  planWireGuardMtu,
   fetchSubscription,
   buildFromRequest,
 });
