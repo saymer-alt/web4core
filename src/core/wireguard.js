@@ -459,17 +459,19 @@ function planWireGuardMtu(doc) {
         }
         r.importedMtu = pr.importedMtu;
         const cpaMinB = pr.cpaSet ? (pr.cpaMin ?? 0) : 0;
+        // per-hop worst-case = 32 (WG hdr+tag) + 15 (align) + 28 (inner IP/UDP) = 75,
+        // плюс S4/CPA-max как пер-пакетные байты. Align считается РОВНО ОДИН РАЗ.
         let ovhMax;
         if (pr.cpaSet) {
-            ovhMax = 32 + pr.s4 + (pr.cpaMax ?? 0);
+            ovhMax = pr.s4 + (pr.cpaMax ?? 0);
         } else if (pr.rt) {
-            ovhMax = null;
+            ovhMax = null; // RandomTrailers: граница не выводится из конфига
         } else {
-            ovhMax = 32 + pr.s4 + 15;
+            ovhMax = pr.s4;
         }
         r.overhead = {
             min: 32 + pr.s4 + cpaMinB,
-            max: ovhMax,
+            max: 32 + (ovhMax !== null ? ovhMax + 15 : null),
             deterministic: pr.cpaSet || !pr.rt,
         };
         const dialer = pr.dialer;
@@ -488,10 +490,13 @@ function planWireGuardMtu(doc) {
                 r.confidence = outer.confidence !== 'proven' ? outer.confidence : 'unknown';
                 r.effective = pr.importedMtu;
                 if (ovhMax === null) r.reason.push('AWG RandomTrailers: строгая верхняя граница overhead не выводится из конфига — расчёт остановлен, исходный MTU сохранён');
-                if (outer.confidence !== 'proven') r.reason.push('внешний hop «' + dialer + '» не имеет доказанного бюджета');
+                if (outer.confidence !== 'proven') {
+                    r.reason.push('внешний hop «' + dialer + '» не имеет доказанного бюджета');
+                    (outer.reason || []).forEach(rs => r.reason.push('↳ ' + rs)); // проброс причин (в т.ч. ниже-минимум)
+                }
             } else {
                 // worst-case IPv4: inner_A + align(15) + 32 + S4 + CPA-max + 28 (inner IP+UDP) ≤ MTU_B
-                r.ceiling = outer.effective - (ovhMax + 15 + 28);
+                r.ceiling = outer.effective - (32 + (ovhMax !== null ? ovhMax : 15) + 15 + 28);
                 if (r.ceiling < PRACTICAL_MIN) {
                     r.confidence = 'error';
                     r.effective = pr.importedMtu;

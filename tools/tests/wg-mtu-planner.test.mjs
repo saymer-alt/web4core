@@ -84,7 +84,7 @@ test('AWG S4 + ContentPaddingAddition: worst-case max(range) enters the ceiling'
     // 1408 - (32 + 20 + 100 + 15 + 28) = 1213
     assert.equal(a.ceiling, 1213);
     assert.equal(a.overhead.min, 32 + 20 + 10);
-    assert.equal(a.overhead.max, 32 + 20 + 100);
+    assert.equal(a.overhead.max, 32 + 20 + 100 + 15, 'wire-overhead max включает align 15');
     assert.equal(a.overhead.deterministic, true);
 });
 
