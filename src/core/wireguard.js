@@ -28,8 +28,17 @@ function parseWireGuardConf(confText, nameHint) {
     const parseCsv = (v) => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
     const parseAddrList = (v) => parseCsv(v).map(x => x.replace(/\s+/g, '')).filter(Boolean);
 
+    // NIGHT-06: no-silent-drop контракт. Каждое распознанное AWG-поле получает запись:
+    // SUPPORTED | SUPPORTED_NORMALIZED | UNSUPPORTED | INVALID | UNKNOWN.
+    // rawValue хранится всегда — факт наличия поля в исходнике не теряется.
+    const awgReport = [];
+    const report = (key, rawValue, status, note) => {
+        awgReport.push({ key: String(key || ''), rawValue: String(rawValue ?? ''), status, note: note || '' });
+    };
+    const UINT32_MAX = 4294967295;
     const setAwgOpt = (target, key, value) => {
         const k = String(key || '').trim().toLowerCase();
+        const raw = String(value ?? '').trim();
         const map = {
             jc: 'jc',
             jmin: 'jmin',
@@ -62,21 +71,64 @@ function parseWireGuardConf(confText, nameHint) {
             randomtrailers: 'random-trailers',
             disablecookies: 'disable-cookies',
         };
-        if (!map[k]) return false;
+        if (!map[k]) {
+            if (k) report(key, raw, 'UNKNOWN', 'неизвестное AWG-поле — в YAML не попадает');
+            return false;
+        }
         if (!target['amnezia-wg-option']) target['amnezia-wg-option'] = {};
         const outKey = map[k];
-        const raw = String(value || '').trim();
         const numericKeys = new Set(['version', 'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'itime']);
+        const uintKeys = new Set(['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4']); // uint32 (itime int64, version малое)
         const booleanKeys = new Set(['random-trailers', 'disable-cookies']);
-        if (numericKeys.has(outKey) && /^-?\d+$/.test(raw)) {
-            target['amnezia-wg-option'][outKey] = parseInt(raw, 10);
-        } else if (booleanKeys.has(outKey)) {
-            const boolValue = raw.toLowerCase();
-            if (!['1', 'true', 'yes', '0', 'false', 'no'].includes(boolValue)) return false;
-            target['amnezia-wg-option'][outKey] = ['1', 'true', 'yes'].includes(boolValue);
-        } else {
-            target['amnezia-wg-option'][outKey] = raw;
+        if (numericKeys.has(outKey)) {
+            if (!/^-?\d+$/.test(raw)) {
+                // строгий парсинг: '123abc' НЕ превращается в 123
+                target['amnezia-wg-option'][outKey] = raw; // fidelity: raw сохраняется
+                report(outKey, raw, 'INVALID', 'ожидалось целое число, Mihomo такое значение отвергнет');
+                return true;
+            }
+            const n = parseInt(raw, 10);
+            if (n < 0 || (uintKeys.has(outKey) && n > UINT32_MAX)) {
+                target['amnezia-wg-option'][outKey] = raw;
+                report(outKey, raw, 'INVALID', 'вне диапазона uint32');
+                return true;
+            }
+            target['amnezia-wg-option'][outKey] = n;
+            report(outKey, raw, 'SUPPORTED');
+            return true;
         }
+        if (booleanKeys.has(outKey)) {
+            const boolValue = raw.toLowerCase();
+            if (!['1', 'true', 'yes', '0', 'false', 'no'].includes(boolValue)) {
+                // 'on'/'off' нормализует consumer до парсера; прочее — UNSUPPORTED, raw сохранён
+                target['amnezia-wg-option'][outKey] = raw;
+                report(outKey, raw, 'UNSUPPORTED', 'нераспознанное булево значение (ожидается 1/true/yes/0/false/no)');
+                return true;
+            }
+            target['amnezia-wg-option'][outKey] = ['1', 'true', 'yes'].includes(boolValue);
+            report(outKey, raw, 'SUPPORTED');
+            return true;
+        }
+        if (outKey === 'header-protection-key') {
+            target['amnezia-wg-option'][outKey] = raw; // trim only, без lowercasing/конверсий
+            report(outKey, '(present)', 'SUPPORTED');
+            return true;
+        }
+        if (outKey === 'content-padding-addition') {
+            const okSyntax = /^\d+(-\d+)?$/.test(raw);
+            target['amnezia-wg-option'][outKey] = raw;
+            report(outKey, raw, okSyntax ? 'SUPPORTED' : 'INVALID', okSyntax ? '' : 'ожидается N или N-M');
+            return true;
+        }
+        if (['rekey-after-time', 'rekey-timeout', 'reject-after-time', 'keepalive-timeout', 'max-handshake-attempts'].includes(outKey)) {
+            // v3 timings — uint или range "min-max" (AtomicUintRange), единицы — секунды
+            const okSyntax = /^\d+(-\d+)?$/.test(raw);
+            target['amnezia-wg-option'][outKey] = raw;
+            report(outKey, raw, okSyntax ? 'SUPPORTED' : 'INVALID', okSyntax ? '' : 'ожидается N или N-M (секунды)');
+            return true;
+        }
+        target['amnezia-wg-option'][outKey] = raw;
+        report(outKey, raw, 'SUPPORTED');
         return true;
     };
 
@@ -127,15 +179,34 @@ function parseWireGuardConf(confText, nameHint) {
             } else if (keyLower === 'ipstackcongestioncontroller') {
                 if (!iface.ipStack) iface.ipStack = {};
                 iface.ipStack['congestion-controller'] = value;
+            } else if (['listenport', 'table', 'saveconfig', 'preup', 'postup', 'predown', 'postdown', 'fwmark'].includes(keyLower)) {
+                report(key, value, 'IGNORED_BY_POLICY', 'поле WireGuard-окружения, не применимое к Mihomo proxy');
             }
         } else if (section === 'peer' && curPeer) {
             if (keyLower === 'publickey') curPeer.publicKey = value;
             else if (keyLower === 'presharedkey') curPeer.preSharedKey = value;
             else if (keyLower === 'allowedips') curPeer.allowedIPs = parseAddrList(value);
             else if (keyLower === 'endpoint') curPeer.endpoint = value;
-            else if (keyLower === 'persistentkeepalive') curPeer.persistentKeepalive = /^\d+$/.test(value) ? parseInt(value, 10) : undefined;
+            else if (keyLower === 'persistentkeepalive') {
+                // NIGHT-06: различаем missing / 0 (disabled) / положительное / диапазон / мусор.
+                if (/^\d+$/.test(value)) {
+                    curPeer.persistentKeepalive = parseInt(value, 10);
+                    report('persistent-keepalive', value, value === '0' ? 'SUPPORTED_NORMALIZED' : 'SUPPORTED',
+                        value === '0' ? '0 = keepalive отключён (Mihomo опустит поле)' : '');
+                } else if (/^\d+-\d+$/.test(value)) {
+                    // диапазон (AmneziaWG random-per-interval): Mihomo принимает только целое —
+                    // значение НЕ эмитится, факт исходника сохраняется в отчёте
+                    curPeer.pkRaw = value;
+                    report('persistent-keepalive', value, 'UNSUPPORTED', 'Mihomo ожидает целое persistent-keepalive — диапазон не перенесён');
+                } else {
+                    curPeer.pkRaw = value;
+                    report('persistent-keepalive', value, 'INVALID', 'ожидалось целое число (или диапазон)');
+                }
+            }
             else if (keyLower === 'reserved') {
                 curPeer.reserved = parseReserved(value);
+            } else if (['listenport', 'table', 'saveconfig', 'preup', 'postup', 'predown', 'postdown', 'fwmark'].includes(keyLower)) {
+                report(key, value, 'IGNORED_BY_POLICY', 'поле WireGuard-окружения, не применимое к Mihomo proxy');
             } else {
                 setAwgOpt(iface, key, value);
             }
@@ -197,11 +268,15 @@ function parseWireGuardConf(confText, nameHint) {
             remoteDnsResolve: Array.isArray(iface.dns) && iface.dns.length ? true : false,
             ipStack: (iface.ipStack && typeof iface.ipStack === 'object') ? iface.ipStack : undefined,
             mtu: iface.mtu,
-            persistentKeepalive: keepalive
+            persistentKeepalive: keepalive,
+            persistentKeepaliveRaw: peers.map(p => p.pkRaw).find(v => v !== undefined),
         }
     };
     if (iface['amnezia-wg-option']) {
         bean.wireguard['amnezia-wg-option'] = iface['amnezia-wg-option'];
+    }
+    if (awgReport.length) {
+        bean.awgFieldReport = awgReport; // no-silent-drop: факт по каждому полю
     }
     return bean;
 }
@@ -324,6 +399,17 @@ function analyzeWireGuardProfile(bean) {
     const importedMtu = Number.isFinite(wg.mtu) && wg.mtu > 0 ? wg.mtu : null;
     const notes = [];
     const awg = wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object' ? wg['amnezia-wg-option'] : {};
+    // no-silent-drop отчёт парсера: UNSUPPORTED/INVALID/UNKNOWN → WARN на карточке
+    const reportIssues = (bean.awgFieldReport || []).filter(r => ['UNSUPPORTED', 'INVALID', 'UNKNOWN'].includes(r.status));
+    for (const issue of reportIssues.slice(0, 4)) {
+        notes.push({
+            level: 'warn',
+            text: 'AWG ' + issue.key + ' = ' + issue.rawValue + ' — ' + issue.note + ' (в YAML не перенесено)',
+        });
+    }
+    if (reportIssues.length > 4) {
+        notes.push({ level: 'warn', text: '… и ещё ' + (reportIssues.length - 4) + ' параметра AWG требуют внимания' });
+    }
     const num = v => (Number.isFinite(v) ? v : (/^\d+$/.test(String(v || '')) ? parseInt(v, 10) : null));
 
     if (norm.ipv6Removed) {

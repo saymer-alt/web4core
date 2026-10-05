@@ -729,7 +729,18 @@ function buildMihomoProxy(bean) {
         if (hasPeers) p.peers = peers.map(mapPeer).filter(Boolean);
         if (wg.ipStack && typeof wg.ipStack === 'object' && Object.keys(wg.ipStack).length) p['ip-stack'] = wg.ipStack;
         if (wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object') {
-            p['amnezia-wg-option'] = wg['amnezia-wg-option'];
+            // no-silent-drop (NIGHT-06): INVALID/UNSUPPORTED значения НЕ эмитятся
+            // (mihomo отверг бы весь конфиг) — raw-факт остаётся в bean.awgFieldReport
+            // и показывается диагностикой на карточке профиля.
+            const badKeys = new Set((bean.awgFieldReport || [])
+                .filter(r => r.status === 'INVALID' || r.status === 'UNSUPPORTED')
+                .map(r => String(r.key).toLowerCase()));
+            const cleanOpt = {};
+            for (const [k, v] of Object.entries(wg['amnezia-wg-option'])) {
+                if (badKeys.has(String(k).toLowerCase())) continue;
+                cleanOpt[k] = v;
+            }
+            if (Object.keys(cleanOpt).length) p['amnezia-wg-option'] = cleanOpt;
         }
         applyCommon(p);
         return p;
