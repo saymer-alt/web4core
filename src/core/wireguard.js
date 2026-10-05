@@ -407,7 +407,8 @@ function analyzeWireGuardProfile(bean) {
     const importedMtu = Number.isFinite(wg.mtu) && wg.mtu > 0 ? wg.mtu : null;
     const notes = [];
     const awg = wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object' ? wg['amnezia-wg-option'] : {};
-    // no-silent-drop отчёт парсера: UNSUPPORTED/INVALID/UNKNOWN → WARN на карточке
+    // no-silent-drop отчёт парсера: UNSUPPORTED/INVALID/UNKNOWN → WARN,
+    // SUPPORTED_NORMALIZED (например, PK = 0 → отключено) → info.
     const reportIssues = (bean.awgFieldReport || []).filter(r => ['UNSUPPORTED', 'INVALID', 'UNKNOWN'].includes(r.status));
     for (const issue of reportIssues.slice(0, 4)) {
         notes.push({
@@ -418,6 +419,9 @@ function analyzeWireGuardProfile(bean) {
     if (reportIssues.length > 4) {
         notes.push({ level: 'warn', text: '… и ещё ' + (reportIssues.length - 4) + ' параметра AWG требуют внимания' });
     }
+    (bean.awgFieldReport || []).filter(r => r.status === 'SUPPORTED_NORMALIZED').slice(0, 2).forEach(r => {
+        notes.push({ level: 'info', text: 'AWG ' + r.key + ' = ' + r.rawValue + ' — ' + r.note });
+    });
     const num = v => (Number.isFinite(v) ? v : (/^\d+$/.test(String(v || '')) ? parseInt(v, 10) : null));
 
     if (norm.ipv6Removed) {
