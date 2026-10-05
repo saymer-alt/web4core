@@ -441,7 +441,7 @@ function planWireGuardMtu(doc) {
 
     const memo = new Map();
     const visiting = new Set();
-    function plan(name, chain) {
+    function plan(name) {
         if (memo.has(name)) return memo.get(name);
         if (visiting.has(name)) {
             const r = { name, confidence: 'cycle', ceiling: null, effective: null, reason: ['цикл dialer-proxy — считается authoritative cycle detection при сборке'] };
@@ -450,7 +450,7 @@ function planWireGuardMtu(doc) {
         }
         visiting.add(name);
         const pr = byProfile.get(name);
-        const r = { name, chain, confidence: 'proven', ceiling: null, effective: null, overhead: null, reason: [] };
+        const r = { name, chain: [name], confidence: 'proven', ceiling: null, effective: null, overhead: null, reason: [] };
         if (!pr) {
             r.confidence = 'unknown';
             r.reason.push('профиль не найден в конфиге');
@@ -482,8 +482,8 @@ function planWireGuardMtu(doc) {
             r.reason.push('MTU chain analysis stops at non-WG/AWG dialer target «' + dialer + '»');
             r.effective = pr.importedMtu;
         } else {
-            const outer = plan(dialer, [name].concat(chain));
-            r.chain = outer.chain || chain;
+            const outer = plan(dialer);
+            r.chain = [name].concat(outer.chain || []);
             if (outer.confidence !== 'proven' || outer.effective === null || ovhMax === null) {
                 r.confidence = outer.confidence !== 'proven' ? outer.confidence : 'unknown';
                 r.effective = pr.importedMtu;
@@ -503,10 +503,11 @@ function planWireGuardMtu(doc) {
                 }
             }
         }
+        visiting.delete(name);
         memo.set(name, r);
         return r;
     }
-    const out = profiles.map(p => plan(p.name, [p.name]));
+    const out = profiles.map(p => plan(p.name));
     return { profiles: out, note: 'diagnostics-only: YAML/mtu не изменяются' };
 }
 
