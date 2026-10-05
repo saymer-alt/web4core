@@ -71,10 +71,7 @@ function parseWireGuardConf(confText, nameHint) {
             randomtrailers: 'random-trailers',
             disablecookies: 'disable-cookies',
         };
-        if (!map[k]) {
-            if (k) report(key, raw, 'UNKNOWN', 'неизвестное AWG-поле — в YAML не попадает');
-            return false;
-        }
+        if (!map[k]) return false; // возможно, базовое поле секции — решается после разбора строки
         if (!target['amnezia-wg-option']) target['amnezia-wg-option'] = {};
         const outKey = map[k];
         const numericKeys = new Set(['version', 'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'itime']);
@@ -145,6 +142,7 @@ function parseWireGuardConf(confText, nameHint) {
         return s;
     };
 
+    const unmatched = []; // нераспознанные setAwgOpt'ом строки — базовые поля отфильтруются после
     for (const rawLine of lines) {
         const ln = cleanLine(rawLine);
         if (!ln) continue;
@@ -166,6 +164,7 @@ function parseWireGuardConf(confText, nameHint) {
         const keyLower = key.toLowerCase();
 
         if (setAwgOpt(iface, key, value)) continue;
+        unmatched.push({ key: key.trim(), value, section });
 
         if (section === 'interface') {
             if (keyLower === 'privatekey') iface.privateKey = value;
@@ -210,6 +209,17 @@ function parseWireGuardConf(confText, nameHint) {
             } else {
                 setAwgOpt(iface, key, value);
             }
+        }
+    }
+
+    // Пост-фильтр unmatched: базовые поля секций обрабатываются ветками выше и
+    // НЕ репортятся; действительно неизвестные ключи → UNKNOWN (no-silent-drop).
+    const KNOWN_BASE = new Set(['privatekey', 'address', 'dns', 'mtu', 'name', 'endpoint',
+        'persistentkeepalive', 'publickey', 'presharedkey', 'allowedips', 'reserved',
+        'listenport', 'table', 'saveconfig', 'preup', 'postup', 'predown', 'postdown', 'fwmark']);
+    for (const u of unmatched) {
+        if (!KNOWN_BASE.has(u.key.toLowerCase())) {
+            report(u.key, u.value, 'UNKNOWN', 'неизвестное поле — в YAML не попадает');
         }
     }
 
@@ -275,9 +285,7 @@ function parseWireGuardConf(confText, nameHint) {
     if (iface['amnezia-wg-option']) {
         bean.wireguard['amnezia-wg-option'] = iface['amnezia-wg-option'];
     }
-    if (awgReport.length) {
-        bean.awgFieldReport = awgReport; // no-silent-drop: факт по каждому полю
-    }
+    bean.awgFieldReport = awgReport; // no-silent-drop: факт по каждому полю (всегда массив)
     return bean;
 }
 
