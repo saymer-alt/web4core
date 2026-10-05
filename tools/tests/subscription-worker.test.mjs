@@ -232,3 +232,44 @@ test('normal single request with POST identity unaffected by deadline change', a
     assert.equal(resp.status, 200);
     assert.equal(await resp.text(), 'fast-ok');
 });
+
+test('header value sanity: CR/LF injection is dropped, not forwarded', async () => {
+    const req = jsonRequest({
+        url: UPSTREAM,
+        headers: { 'x-hwid': 'aaa\r\nX-Injected: yes', 'x-device-model': 'CRLF Probe' }
+    });
+    const resp = await callWorker(req, async (target, init) => {
+        const h = new Headers(init.headers);
+        assert.equal(h.get('x-hwid'), null, 'CRLF-bearing value must not be forwarded');
+        assert.equal(h.get('x-device-model'), 'CRLF Probe', 'clean allowlisted header still forwarded');
+        return new Response('ok', { status: 200 });
+    });
+    assert.equal(resp.status, 200);
+});
+
+test('header value sanity: values longer than 256 chars are dropped', async () => {
+    const req = jsonRequest({
+        url: UPSTREAM,
+        headers: { 'x-hwid': 'a'.repeat(300), 'x-device-model': 'Len Probe' }
+    });
+    const resp = await callWorker(req, async (target, init) => {
+        const h = new Headers(init.headers);
+        assert.equal(h.get('x-hwid'), null, 'overlong value must not be forwarded');
+        assert.equal(h.get('x-device-model'), 'Len Probe');
+        return new Response('ok', { status: 200 });
+    });
+    assert.equal(resp.status, 200);
+});
+
+test('header value sanity: exact 256-char boundary is still forwarded', async () => {
+    const req = jsonRequest({
+        url: UPSTREAM,
+        headers: { 'x-hwid': 'b'.repeat(256) }
+    });
+    const resp = await callWorker(req, async (target, init) => {
+        const h = new Headers(init.headers);
+        assert.equal(h.get('x-hwid'), 'b'.repeat(256), '256 is within the documented cap');
+        return new Response('ok', { status: 200 });
+    });
+    assert.equal(resp.status, 200);
+});
