@@ -164,6 +164,40 @@ test('IPv6 literal endpoint: hard rejection (primary and peer)', () => {
   assert.match(v2.reason, /peer #2/);
 });
 
+test('v1.8 RC (issue #122): peer with IPv6-only AllowedIPs is rejected, not silently emitted empty', () => {
+  // Ровно кейс из issue: валидный IPv4 Address, но peer AllowedIPs = ::/0.
+  // .conf-парсер сводит единственный [Peer] к interface-level allowedIPs,
+  // поэтому срабатывает interface-проверка (эмиттер не выдаст allowed-ips).
+  const conf = ['[Interface]', 'PrivateKey = CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', 'Address = 10.0.0.2/32', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = ::/0', 'Endpoint = 198.51.100.10:51820'].join(String.fromCharCode(10));
+  const bean = parseWireGuardConf(conf, 'v6aips.conf');
+  const v = validateWireGuardIpv4Only(bean);
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'WG_ALLOWEDIPS_IPV6_ONLY');
+  assert.throws(() => buildMihomoProxy(bean, new Set()), /all AllowedIPs are IPv6/);
+});
+
+test('v1.8 RC (issue #122): peers[] entry with IPv6-only AllowedIPs is rejected (multi-peer path)', () => {
+  const bean = { host: '198.51.100.10', wireguard: { ip: '10.0.0.2', privateKey: 'CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', peers: [{ server: '198.51.100.10', port: 51820, allowedIPs: ['::/0'] }] } };
+  const v = validateWireGuardIpv4Only(bean);
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'WG_PEER_ALLOWEDIPS_IPV6_ONLY');
+  assert.match(v.reason, /peer #1/);
+});
+
+test('v1.8 RC (issue #122): interface-level IPv6-only AllowedIPs is rejected too', () => {
+  const bean = parseWireGuardConf(['[Interface]', 'PrivateKey = CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', 'Address = 10.0.0.2/32', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = ::/0, 2001:db8::/32', 'Endpoint = 198.51.100.10:51820'].join(String.fromCharCode(10)), 'v6aips-iface.conf');
+  const v = validateWireGuardIpv4Only(bean);
+  assert.equal(v.ok, false);
+  assert.equal(v.code, 'WG_ALLOWEDIPS_IPV6_ONLY');
+});
+
+test('v1.8 RC (issue #122): mixed AllowedIPs (0.0.0.0/0, ::/0) still passes — only IPv6-only lists reject', () => {
+  const conf = ['[Interface]', 'PrivateKey = CkGOZHbIxJvSSWWGFlHpNkGt0HhRIcKbmTIrmA9TcHk=', 'Address = 10.0.0.2/32', '[Peer]', 'PublicKey = bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo=', 'AllowedIPs = 0.0.0.0/0, ::/0', 'Endpoint = 198.51.100.10:51820'].join(String.fromCharCode(10));
+  const bean = parseWireGuardConf(conf, 'mixed.conf');
+  const v = validateWireGuardIpv4Only(bean);
+  assert.equal(v.ok, true);
+});
+
 test('ip-version pinned to ipv4 for all WG/AWG output (hostname AAAA protection)', () => {
   const bean = parseWireGuardConf(dualStackConf, 'warp.conf');
   const p = buildMihomoProxy(bean, new Set());

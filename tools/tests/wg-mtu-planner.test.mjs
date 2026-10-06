@@ -81,11 +81,25 @@ test('AWG S4 + ContentPaddingAddition: worst-case max(range) enters the ceiling'
         ],
     });
     const a = r.profiles.find(p => p.name === 'A');
-    // 1408 - (32 + 20 + 100 + 15 + 28) = 1213
-    assert.equal(a.ceiling, 1213);
+    // 1408 - (32 + 20 + 100 + 28) = 1228 — CPA замещает align16 (ветки
+    // взаимоисключающие, v1.8 RC follow-up: без double-count +15)
+    assert.equal(a.ceiling, 1228);
     assert.equal(a.overhead.min, 32 + 20 + 10);
-    assert.equal(a.overhead.max, 32 + 20 + 100 + 15, 'wire-overhead max включает align 15');
+    assert.equal(a.overhead.max, 32 + 20 + 100, 'CPA replaces align16 — без +15');
     assert.equal(a.overhead.deterministic, true);
+});
+
+test('plain WG keeps align15 in ceiling (CPA fix must not touch the plain branch)', () => {
+    const r = planWireGuardMtu({
+        proxies: [
+            wg('A', 1420, 'B', { s4: 20, version: 3 }),
+            wg('B', 1408),
+        ],
+    });
+    const a = r.profiles.find(p => p.name === 'A');
+    // 1408 - (32 + 20 + 15 + 28) = 1313
+    assert.equal(a.ceiling, 1313);
+    assert.equal(a.overhead.max, 32 + 20 + 15);
 });
 
 test('RandomTrailers: no config-derived bound -> confidence unknown, imported preserved', () => {
