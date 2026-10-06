@@ -553,8 +553,8 @@ function buildMihomoProxy(bean) {
                 httpOpts.path = [s.path].filter(Boolean);
             }
             if (s.host) {
-                httpOpts.headers = { 
-                    Host: Array.isArray(s.host) ? s.host : [s.host] 
+                httpOpts.headers = {
+                    Host: Array.isArray(s.host) ? s.host : [s.host]
                 };
             }
             obj['http-opts'] = httpOpts;
