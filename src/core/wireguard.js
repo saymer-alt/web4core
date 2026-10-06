@@ -356,6 +356,31 @@ function validateWireGuardIpv4Only(bean) {
             reason: 'wireguard: peer #' + (v6Peer + 1) + ' has an IPv6 literal endpoint; IPv4-only output requires IPv4 endpoints or hostnames',
         };
     }
+    // v1.8 RC follow-up (issue #122): peer/interface, у которых ВСЕ AllowedIPs были
+    // IPv6, после фильтра остаётся с пустым списком. Молча эмитить такой объект
+    // (peer без allowed-ips / прокси без allowed-ips) — полумёртвый маршрут;
+    // контракт «reject вместо молчаливой порчи».
+    if (Array.isArray(wg.allowedIPs) && wg.allowedIPs.length > 0 && Array.isArray(norm.allowedIPs) && norm.allowedIPs.length === 0) {
+        return {
+            ok: false,
+            code: 'WG_ALLOWEDIPS_IPV6_ONLY',
+            reason: 'wireguard: all AllowedIPs are IPv6; after IPv4-only filtering the list is empty. Profile is rejected instead of a half-working route — add an IPv4 AllowedIPs (e.g. 0.0.0.0/0)',
+        };
+    }
+    const srcPeers = Array.isArray(wg.peers) ? wg.peers : [];
+    for (let i = 0; i < srcPeers.length; i++) {
+        const p = srcPeers[i];
+        if (!p || typeof p !== 'object') continue;
+        const had = Array.isArray(p.allowedIPs) && p.allowedIPs.length > 0;
+        const left = peers[i] && Array.isArray(peers[i].allowedIPs) ? peers[i].allowedIPs.length : 0;
+        if (had && left === 0) {
+            return {
+                ok: false,
+                code: 'WG_PEER_ALLOWEDIPS_IPV6_ONLY',
+                reason: 'wireguard: peer #' + (i + 1) + ' has only IPv6 AllowedIPs; after IPv4-only filtering the list is empty. Peer is rejected instead of a half-working route — add an IPv4 AllowedIPs (e.g. 0.0.0.0/0)',
+            };
+        }
+    }
     return { ok: true, code: null, reason: null };
 }
 
@@ -557,19 +582,27 @@ function planWireGuardMtu(doc) {
         }
         r.importedMtu = pr.importedMtu;
         const cpaMinB = pr.cpaSet ? (pr.cpaMin ?? 0) : 0;
-        // per-hop worst-case = 32 (WG hdr+tag) + 15 (align) + 28 (inner IP/UDP) = 75,
-        // плюс S4/CPA-max как пер-пакетные байты. Align считается РОВНО ОДИН РАЗ.
+        // v3 padding priority (NIGHT-03): ContentPaddingAddition > RandomTrailers > align16,
+        // ветки взаимоисключающие — при заданной CPA align16 НЕ применяется
+        // (v1.8 RC follow-up, issue #122: без этого был double-count +15 B/hop).
         let ovhMax;
+        let alignMax;
         if (pr.cpaSet) {
             ovhMax = pr.s4 + (pr.cpaMax ?? 0);
+            alignMax = 0;
         } else if (pr.rt) {
             ovhMax = null; // RandomTrailers: граница не выводится из конфига
+            alignMax = null;
         } else {
             ovhMax = pr.s4;
+            alignMax = 15;
         }
+        const padDesc = pr.cpaSet
+            ? 'CPA max ' + (pr.cpaMax ?? 0)
+            : 'align ' + alignMax;
         r.overhead = {
             min: 32 + pr.s4 + cpaMinB,
-            max: 32 + (ovhMax !== null ? ovhMax + 15 : null),
+            max: ovhMax !== null ? 32 + ovhMax + alignMax : null,
             deterministic: pr.cpaSet || !pr.rt,
         };
         const dialer = pr.dialer;
@@ -593,8 +626,8 @@ function planWireGuardMtu(doc) {
                     (outer.reason || []).forEach(rs => r.reason.push('↳ ' + rs)); // проброс причин (в т.ч. ниже-минимум)
                 }
             } else {
-                // worst-case IPv4: inner_A + align(15) + 32 + S4 + CPA-max + 28 (inner IP+UDP) ≤ MTU_B
-                r.ceiling = outer.effective - (32 + (ovhMax !== null ? ovhMax : 15) + 15 + 28);
+                // worst-case IPv4: inner_A + padding(CPA-max | align 15) + 32 WG + S4 + 28 (inner IP/UDP) ≤ MTU_B
+                r.ceiling = outer.effective - (32 + ovhMax + alignMax + 28);
                 if (r.ceiling < PRACTICAL_MIN) {
                     r.confidence = 'error';
                     r.effective = pr.importedMtu;
@@ -602,7 +635,7 @@ function planWireGuardMtu(doc) {
                 } else {
                     r.effective = pr.importedMtu !== null ? Math.min(pr.importedMtu, r.ceiling) : r.ceiling;
                     r.mtuSource = 'planned-ceiling';
-                    r.reason.push('dialer-proxy: ' + dialer, 'outer effective MTU: ' + outer.effective, 'IPv4 worst-case per hop: 60 (32 + align 15 + inner IP/UDP 28)');
+                    r.reason.push('dialer-proxy: ' + dialer, 'outer effective MTU: ' + outer.effective, 'IPv4 worst-case per hop: ' + (32 + ovhMax + alignMax + 28) + ' (32 WG hdr+tag + ' + padDesc + (pr.s4 ? ' + S4 ' + pr.s4 : '') + ' + inner IP/UDP 28)');
                 }
             }
         }
