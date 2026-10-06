@@ -28,8 +28,17 @@ function parseWireGuardConf(confText, nameHint) {
     const parseCsv = (v) => String(v || '').split(',').map(x => x.trim()).filter(Boolean);
     const parseAddrList = (v) => parseCsv(v).map(x => x.replace(/\s+/g, '')).filter(Boolean);
 
+    // NIGHT-06: no-silent-drop контракт. Каждое распознанное AWG-поле получает запись:
+    // SUPPORTED | SUPPORTED_NORMALIZED | UNSUPPORTED | INVALID | UNKNOWN.
+    // rawValue хранится всегда — факт наличия поля в исходнике не теряется.
+    const awgReport = [];
+    const report = (key, rawValue, status, note) => {
+        awgReport.push({ key: String(key || ''), rawValue: String(rawValue ?? ''), status, note: note || '' });
+    };
+    const UINT32_MAX = 4294967295;
     const setAwgOpt = (target, key, value) => {
         const k = String(key || '').trim().toLowerCase();
+        const raw = String(value ?? '').trim();
         const map = {
             jc: 'jc',
             jmin: 'jmin',
@@ -62,21 +71,61 @@ function parseWireGuardConf(confText, nameHint) {
             randomtrailers: 'random-trailers',
             disablecookies: 'disable-cookies',
         };
-        if (!map[k]) return false;
+        if (!map[k]) return false; // возможно, базовое поле секции — решается после разбора строки
         if (!target['amnezia-wg-option']) target['amnezia-wg-option'] = {};
         const outKey = map[k];
-        const raw = String(value || '').trim();
         const numericKeys = new Set(['version', 'jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'itime']);
+        const uintKeys = new Set(['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4']); // uint32 (itime int64, version малое)
         const booleanKeys = new Set(['random-trailers', 'disable-cookies']);
-        if (numericKeys.has(outKey) && /^-?\d+$/.test(raw)) {
-            target['amnezia-wg-option'][outKey] = parseInt(raw, 10);
-        } else if (booleanKeys.has(outKey)) {
-            const boolValue = raw.toLowerCase();
-            if (!['1', 'true', 'yes', '0', 'false', 'no'].includes(boolValue)) return false;
-            target['amnezia-wg-option'][outKey] = ['1', 'true', 'yes'].includes(boolValue);
-        } else {
-            target['amnezia-wg-option'][outKey] = raw;
+        if (numericKeys.has(outKey)) {
+            if (!/^-?\d+$/.test(raw)) {
+                // строгий парсинг: '123abc' НЕ превращается в 123
+                target['amnezia-wg-option'][outKey] = raw; // fidelity: raw сохраняется
+                report(outKey, raw, 'INVALID', 'ожидалось целое число, Mihomo такое значение отвергнет');
+                return true;
+            }
+            const n = parseInt(raw, 10);
+            if (n < 0 || (uintKeys.has(outKey) && n > UINT32_MAX)) {
+                target['amnezia-wg-option'][outKey] = raw;
+                report(outKey, raw, 'INVALID', 'вне диапазона uint32');
+                return true;
+            }
+            target['amnezia-wg-option'][outKey] = n;
+            report(outKey, raw, 'SUPPORTED');
+            return true;
         }
+        if (booleanKeys.has(outKey)) {
+            const boolValue = raw.toLowerCase();
+            if (!['1', 'true', 'yes', '0', 'false', 'no'].includes(boolValue)) {
+                // 'on'/'off' нормализует consumer до парсера; прочее — UNSUPPORTED, raw сохранён
+                target['amnezia-wg-option'][outKey] = raw;
+                report(outKey, raw, 'UNSUPPORTED', 'нераспознанное булево значение (ожидается 1/true/yes/0/false/no)');
+                return true;
+            }
+            target['amnezia-wg-option'][outKey] = ['1', 'true', 'yes'].includes(boolValue);
+            report(outKey, raw, 'SUPPORTED');
+            return true;
+        }
+        if (outKey === 'header-protection-key') {
+            target['amnezia-wg-option'][outKey] = raw; // trim only, без lowercasing/конверсий
+            report(outKey, '(present)', 'SUPPORTED');
+            return true;
+        }
+        if (outKey === 'content-padding-addition') {
+            const okSyntax = /^\d+(-\d+)?$/.test(raw);
+            target['amnezia-wg-option'][outKey] = raw;
+            report(outKey, raw, okSyntax ? 'SUPPORTED' : 'INVALID', okSyntax ? '' : 'ожидается N или N-M');
+            return true;
+        }
+        if (['rekey-after-time', 'rekey-timeout', 'reject-after-time', 'keepalive-timeout', 'max-handshake-attempts'].includes(outKey)) {
+            // v3 timings — uint или range "min-max" (AtomicUintRange), единицы — секунды
+            const okSyntax = /^\d+(-\d+)?$/.test(raw);
+            target['amnezia-wg-option'][outKey] = raw;
+            report(outKey, raw, okSyntax ? 'SUPPORTED' : 'INVALID', okSyntax ? '' : 'ожидается N или N-M (секунды)');
+            return true;
+        }
+        target['amnezia-wg-option'][outKey] = raw;
+        report(outKey, raw, 'SUPPORTED');
         return true;
     };
 
@@ -93,6 +142,7 @@ function parseWireGuardConf(confText, nameHint) {
         return s;
     };
 
+    const unmatched = []; // нераспознанные setAwgOpt'ом строки — базовые поля отфильтруются после
     for (const rawLine of lines) {
         const ln = cleanLine(rawLine);
         if (!ln) continue;
@@ -114,6 +164,7 @@ function parseWireGuardConf(confText, nameHint) {
         const keyLower = key.toLowerCase();
 
         if (setAwgOpt(iface, key, value)) continue;
+        unmatched.push({ key: key.trim(), value, section });
 
         if (section === 'interface') {
             if (keyLower === 'privatekey') iface.privateKey = value;
@@ -127,18 +178,48 @@ function parseWireGuardConf(confText, nameHint) {
             } else if (keyLower === 'ipstackcongestioncontroller') {
                 if (!iface.ipStack) iface.ipStack = {};
                 iface.ipStack['congestion-controller'] = value;
+            } else if (['listenport', 'table', 'saveconfig', 'preup', 'postup', 'predown', 'postdown', 'fwmark'].includes(keyLower)) {
+                report(key, value, 'IGNORED_BY_POLICY', 'поле WireGuard-окружения, не применимое к Mihomo proxy');
             }
         } else if (section === 'peer' && curPeer) {
             if (keyLower === 'publickey') curPeer.publicKey = value;
             else if (keyLower === 'presharedkey') curPeer.preSharedKey = value;
             else if (keyLower === 'allowedips') curPeer.allowedIPs = parseAddrList(value);
             else if (keyLower === 'endpoint') curPeer.endpoint = value;
-            else if (keyLower === 'persistentkeepalive') curPeer.persistentKeepalive = /^\d+$/.test(value) ? parseInt(value, 10) : undefined;
+            else if (keyLower === 'persistentkeepalive') {
+                // NIGHT-06: различаем missing / 0 (disabled) / положительное / диапазон / мусор.
+                if (/^\d+$/.test(value)) {
+                    curPeer.persistentKeepalive = parseInt(value, 10);
+                    report('persistent-keepalive', value, value === '0' ? 'SUPPORTED_NORMALIZED' : 'SUPPORTED',
+                        value === '0' ? '0 = keepalive отключён (Mihomo опустит поле)' : '');
+                } else if (/^\d+-\d+$/.test(value)) {
+                    // диапазон (AmneziaWG random-per-interval): Mihomo принимает только целое —
+                    // значение НЕ эмитится, факт исходника сохраняется в отчёте
+                    curPeer.pkRaw = value;
+                    report('persistent-keepalive', value, 'UNSUPPORTED', 'Mihomo ожидает целое persistent-keepalive — диапазон не перенесён');
+                } else {
+                    curPeer.pkRaw = value;
+                    report('persistent-keepalive', value, 'INVALID', 'ожидалось целое число (или диапазон)');
+                }
+            }
             else if (keyLower === 'reserved') {
                 curPeer.reserved = parseReserved(value);
+            } else if (['listenport', 'table', 'saveconfig', 'preup', 'postup', 'predown', 'postdown', 'fwmark'].includes(keyLower)) {
+                report(key, value, 'IGNORED_BY_POLICY', 'поле WireGuard-окружения, не применимое к Mihomo proxy');
             } else {
                 setAwgOpt(iface, key, value);
             }
+        }
+    }
+
+    // Пост-фильтр unmatched: базовые поля секций обрабатываются ветками выше и
+    // НЕ репортятся; действительно неизвестные ключи → UNKNOWN (no-silent-drop).
+    const KNOWN_BASE = new Set(['privatekey', 'address', 'dns', 'mtu', 'name', 'endpoint',
+        'persistentkeepalive', 'publickey', 'presharedkey', 'allowedips', 'reserved',
+        'listenport', 'table', 'saveconfig', 'preup', 'postup', 'predown', 'postdown', 'fwmark']);
+    for (const u of unmatched) {
+        if (!KNOWN_BASE.has(u.key.toLowerCase())) {
+            report(u.key, u.value, 'UNKNOWN', 'неизвестное поле — в YAML не попадает');
         }
     }
 
@@ -197,15 +278,347 @@ function parseWireGuardConf(confText, nameHint) {
             remoteDnsResolve: Array.isArray(iface.dns) && iface.dns.length ? true : false,
             ipStack: (iface.ipStack && typeof iface.ipStack === 'object') ? iface.ipStack : undefined,
             mtu: iface.mtu,
-            persistentKeepalive: keepalive
+            persistentKeepalive: keepalive,
+            persistentKeepaliveRaw: peers.map(p => p.pkRaw).find(v => v !== undefined),
         }
     };
     if (iface['amnezia-wg-option']) {
         bean.wireguard['amnezia-wg-option'] = iface['amnezia-wg-option'];
     }
+    bean.awgFieldReport = awgReport; // no-silent-drop: факт по каждому полю (всегда массив)
     return bean;
+}
+
+// IPv4-only contract (link-generators v1.8.0): нормализация выполняется на
+// build-слое, парсер остаётся faithful к исходному файлу. Убирается только IPv6:
+// interface-адрес ::, allowed-ips с ':' (включая ::/0), поле ipv6. IPv4 не трогается.
+function isIpv6AddrEntry(entry) {
+    return String(entry || '').includes(':');
+}
+
+function normalizeWireGuardIpv4Only(wg) {
+    const src = wg && typeof wg === 'object' ? wg : {};
+    const allowedIPs = Array.isArray(src.allowedIPs)
+        ? src.allowedIPs.filter(x => !isIpv6AddrEntry(x))
+        : src.allowedIPs;
+    const peers = Array.isArray(src.peers)
+        ? src.peers.map(peer => {
+            if (!peer || typeof peer !== 'object') return peer;
+            const filtered = Array.isArray(peer.allowedIPs) ? peer.allowedIPs.filter(x => !isIpv6AddrEntry(x)) : peer.allowedIPs;
+            return Object.assign({}, peer, { allowedIPs: filtered });
+        })
+        : src.peers;
+    const dns = Array.isArray(src.dns) ? src.dns.filter(x => !isIpv6AddrEntry(x)) : src.dns;
+    const removed = {
+        addresses: isIpv6AddrEntry(src.ipv6) ? 1 : 0,
+        allowedIps: (Array.isArray(src.allowedIPs) ? src.allowedIPs.filter(x => isIpv6AddrEntry(x)).length : 0)
+            + (Array.isArray(src.peers) ? src.peers.reduce((acc, peer) => acc + (Array.isArray(peer && peer.allowedIPs) ? peer.allowedIPs.filter(x => isIpv6AddrEntry(x)).length : 0), 0) : 0),
+        dns: (Array.isArray(src.dns) ? src.dns.filter(x => isIpv6AddrEntry(x)).length : 0),
+    };
+    return {
+        ip: src.ip || '',
+        ipv6: '', // contract: IPv6 interface address never emitted
+        allowedIPs,
+        peers,
+        dns,
+        removed,
+        ipv6Removed: removed.addresses + removed.allowedIps + removed.dns > 0,
+        ipv6RemovedCount: removed.addresses + removed.allowedIps + removed.dns,
+    };
+}
+
+// Жёсткая часть IPv4-only контракта: то, что не может быть «мягко отфильтровано».
+// Возвращает { ok, reason } — emitter обязан reject-ить профиль при !ok.
+function validateWireGuardIpv4Only(bean) {
+    const wg = bean && bean.wireguard && typeof bean.wireguard === 'object' ? bean.wireguard : {};
+    const norm = normalizeWireGuardIpv4Only(wg);
+    if (!norm.ip) {
+        return {
+            ok: false,
+            code: 'WG_IPV6_ONLY_ADDRESS',
+            reason: 'wireguard: profile has only an IPv6 interface address; link-generators emits IPv4-only WireGuard and requires an IPv4 Address',
+        };
+    }
+    const isV6 = (s) => String(s || '').includes(':');
+    if (isV6(bean.host)) {
+        return {
+            ok: false,
+            code: 'WG_IPV6_ENDPOINT',
+            reason: 'wireguard: IPv6 literal endpoint "' + bean.host + '" is not allowed in IPv4-only output; use an IPv4 endpoint or a hostname',
+        };
+    }
+    const peers = Array.isArray(norm.peers) ? norm.peers : [];
+    const v6Peer = peers.findIndex(p => p && isV6(p.server));
+    if (v6Peer !== -1) {
+        return {
+            ok: false,
+            code: 'WG_IPV6_ENDPOINT',
+            reason: 'wireguard: peer #' + (v6Peer + 1) + ' has an IPv6 literal endpoint; IPv4-only output requires IPv4 endpoints or hostnames',
+        };
+    }
+    return { ok: true, code: null, reason: null };
+}
+
+// Размер (в байтах) I-tag последовательности AmneziaWG. Синтаксис тегов
+// воспроизводит device_v1/awg (v1.5) и device/obf* (v3) amneziawg-go:
+//   <b 0xHEX> — hex-байты; <r N>/<rc N>/<rd N> — N случайных байт/ASCII/цифр;
+//   <t> — 8-байтовый timestamp; <c> — 8-байтовый счётчик;
+//   <wt N>/<wr N> — wait-теги, байт не добавляют; <d>/<ds>/<dz N> — data-теги v3.
+// Возвращает { size, unknown: [теги] } — точный размер, если все теги известны.
+function computeAmneziaTagJunkSize(spec) {
+    const input = String(spec || '');
+    const tags = input.match(/<[^<>]*>/g) || [];
+    let size = 0;
+    const unknown = [];
+    for (const raw of tags) {
+        const m = raw.slice(1, -1).match(/^([a-zA-Z]+)(?:\s+(.*?))?$/);
+        if (!m) { unknown.push(raw); continue; }
+        const tag = m[1];
+        const param = (m[2] || '').trim();
+        const n = /^\d+$/.test(param) ? parseInt(param, 10) : null;
+        if (tag === 'b') {
+            const hex = param.replace(/^0x/i, '').replace(/\s+/g, '');
+            size += /^[0-9a-fA-F]+$/.test(hex) ? Math.floor(hex.length / 2) : 0;
+            if (!/^[0-9a-fA-F]+$/.test(hex)) unknown.push(raw);
+        } else if ((tag === 'r' || tag === 'rc' || tag === 'rd') && n !== null) {
+            size += n;
+        } else if (tag === 't' || tag === 'c') {
+            size += (n !== null && n > 0) ? n : 8;
+        } else if (tag === 'wt' || tag === 'wr' || tag === 'd' || tag === 'ds') {
+            // wait-теги и data-теги байт в пакет не добавляют
+        } else if (tag === 'dz' && n !== null) {
+            size += n;
+        } else {
+            unknown.push(raw);
+        }
+    }
+    if (!tags.length) unknown.push(input);
+    return { size, unknown };
+}
+
+// Диагностика профиля WG/AWG для UI: imported/effective MTU, следы IPv6-нормализации
+// и классификация AWG-параметров. Только чтение; effectiveMtu в v1.8.0 НИКОГДА не
+// больше importedMtu (auto-change не выполняется — см. ROADMAP про PoC-гейт).
+// Default 1408 — source-pinned: MetaCubeX/mihomo adapter/outbound/wireguard.go
+// (`if mtu == 0 { mtu = 1408 }`), теги v1.19.31 == v1.19.32.
+function analyzeWireGuardProfile(bean) {
+    const wg = bean && bean.wireguard && typeof bean.wireguard === 'object' ? bean.wireguard : {};
+    const norm = normalizeWireGuardIpv4Only(wg);
+    const importedMtu = Number.isFinite(wg.mtu) && wg.mtu > 0 ? wg.mtu : null;
+    const notes = [];
+    const awg = wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object' ? wg['amnezia-wg-option'] : {};
+    // no-silent-drop отчёт парсера: UNSUPPORTED/INVALID/UNKNOWN → WARN,
+    // SUPPORTED_NORMALIZED (например, PK = 0 → отключено) → info.
+    const reportIssues = (bean.awgFieldReport || []).filter(r => ['UNSUPPORTED', 'INVALID', 'UNKNOWN'].includes(r.status));
+    for (const issue of reportIssues.slice(0, 4)) {
+        notes.push({
+            level: 'warn',
+            text: 'AWG ' + issue.key + ' = ' + issue.rawValue + ' — ' + issue.note + ' (в YAML не перенесено)',
+        });
+    }
+    if (reportIssues.length > 4) {
+        notes.push({ level: 'warn', text: '… и ещё ' + (reportIssues.length - 4) + ' параметра AWG требуют внимания' });
+    }
+    (bean.awgFieldReport || []).filter(r => r.status === 'SUPPORTED_NORMALIZED').slice(0, 2).forEach(r => {
+        notes.push({ level: 'info', text: 'AWG ' + r.key + ' = ' + r.rawValue + ' — ' + r.note });
+    });
+    const num = v => (Number.isFinite(v) ? v : (/^\d+$/.test(String(v || '')) ? parseInt(v, 10) : null));
+
+    if (norm.ipv6Removed) {
+        notes.push({ level: 'info', text: 'IPv6 detected in imported WG/AWG profile. Removed by link-generators IPv4-only contract.' });
+    }
+    if (importedMtu === null) {
+        notes.push({ level: 'info', text: 'MTU в конфиге не задан — Mihomo применит default 1408.' });
+    }
+
+    const s4 = num(awg.s4);
+    if (s4 !== null && s4 > 0) {
+        notes.push({ level: 'info', text: 'AWG S4 = ' + s4 + ': junk добавляется к каждому transport-пакету (пер-пакетный overhead).' });
+    }
+    const cpRaw = String(awg['content-padding-addition'] || '').trim();
+    if (cpRaw) {
+        const range = cpRaw.match(/^(\d+)-(\d+)$/);
+        const maxPad = range ? parseInt(range[2], 10) : num(cpRaw);
+        if (maxPad !== null && maxPad > 0) {
+            notes.push({ level: 'info', text: 'AWG ContentPaddingAddition = ' + cpRaw + ': пер-пакетный padding, worst-case +' + maxPad + ' байт учтён в диагностике.' });
+        } else {
+            notes.push({ level: 'warn', text: 'AWG ContentPaddingAddition="' + cpRaw + '": формат не распознан, точный overhead не вычислить.' });
+        }
+    }
+    if (awg['random-trailers'] === true) {
+        notes.push({ level: 'warn', text: 'AWG RandomTrailers включён: случайные хвосты ограничены внутренним окном реализации (DefaultUdpWindow=500 в amneziawg-go), строгая верхняя граница из конфига не выводится.' });
+    }
+    const jmax = num(awg.jmax);
+    const jc = num(awg.jc);
+    if (jc !== null && jc > 0 && jmax !== null && jmax > 1408) {
+        notes.push({ level: 'warn', text: 'AWG Jmax = ' + jmax + ' превышает default transport-бюджет 1408: junk-пакеты отдельные и могут фрагментироваться на path MTU.' });
+    }
+    const iSizes = [];
+    for (const key of ['i1', 'i2', 'i3', 'i4', 'i5']) {
+        const spec = awg[key];
+        if (!spec) continue;
+        const calc = computeAmneziaTagJunkSize(spec);
+        iSizes.push({ key: key.toUpperCase(), size: calc.unknown.length ? null : calc.size, unknown: calc.unknown });
+    }
+    for (const i of iSizes) {
+        if (i.size === null) {
+            notes.push({ level: 'warn', text: 'AWG ' + i.key + ': не все теги распознаны, размер signature-пакета не вычислить точно.' });
+        } else if (i.size > 1408) {
+            notes.push({ level: 'warn', text: 'AWG ' + i.key + ' = ' + i.size + ' B превышает default transport-бюджет 1408: signature-пакет отдельный и может фрагментироваться.' });
+        } else if (i.size > 0) {
+            notes.push({ level: 'info', text: 'AWG ' + i.key + ': signature-пакет ' + i.size + ' B (отдельный, при handshake).' });
+        }
+    }
+    const handshakeOnly = ['s1', 's2', 's3'].filter(k => num(awg[k]) > 0);
+    if (handshakeOnly.length) {
+        notes.push({ level: 'info', text: 'AWG ' + handshakeOnly.map(k => k.toUpperCase()).join('/') + ': junk только в handshake-пакетах, на transport MTU не влияет.' });
+    }
+    const headerTags = ['h1', 'h2', 'h3', 'h4'].filter(k => awg[k] !== undefined && awg[k] !== '');
+    if (headerTags.length) {
+        notes.push({ level: 'info', text: 'AWG ' + headerTags.map(k => k.toUpperCase()).join('/') + ': заменяют тип сообщения (байты), длину пакетов не меняют.' });
+    }
+
+    return {
+        importedMtu,
+        effectiveMtu: importedMtu, // v1.8.0: auto-correction не выполняется (PoC-гейт не пройден)
+        mtuSource: importedMtu !== null ? 'imported' : 'engine-default',
+        engineDefaultMtu: 1408,
+        ipv6Removed: norm.ipv6Removed,
+        ipv6RemovedCount: norm.ipv6RemovedCount,
+        removed: norm.removed,
+        ipv6OnlyAddress: !norm.ip,
+        ipv6LiteralEndpoints: [
+            ...(isIpv6AddrEntry(bean.host) ? ['primary'] : []),
+            ...((Array.isArray(norm.peers) ? norm.peers : []).map((p, i) => (p && isIpv6AddrEntry(p.server) ? 'peer #' + (i + 1) : null)).filter(Boolean)),
+        ],
+        notes,
+        awg: {
+            version: awg.version !== undefined ? awg.version : null,
+            s4: s4 !== null ? s4 : 0,
+            contentPaddingAddition: cpRaw || null,
+            randomTrailers: awg['random-trailers'] === true,
+            junkPacketCount: jc !== null ? jc : 0,
+            junkPacketMaxSize: jmax !== null ? jmax : 0,
+            iSizes
+        }
+    };
+}
+
+// MTU chain planner — ТОЛЬКО диагностика (v1.8.0). НИКОГДА не меняет YAML/mtu:
+// auto-MTU остаётся выключенным, пока mipstack runtime и live-crypto PoC не
+// докажут модель на реальных стеках (NIGHT-02: PARTIALLY PROVEN, gVisor path).
+// Модель (NIGHT-02/03, IPv4): каждый уровень вложения добавляет
+// 32 (WG hdr+tag) + S4 + CPA-max|align(15) к inner-пакету, а транспорт
+// через dialer добавляет inner IP+UDP = 28. Направление расчёта: outermost → inner.
+// Стеки без строгой верхней границы overhead (RandomTrailers) и цепочки,
+// упирающиеся в не-WG/AWG dialer, получают confidence unknown/stopped —
+// потолок не выдаётся вовсе.
+function planWireGuardMtu(doc) {
+    const proxies = (doc && Array.isArray(doc.proxies))
+        ? doc.proxies.filter(p => p && p.type === 'wireguard' && p.name)
+        : [];
+    const byName = new Map(proxies.map(p => [p.name, p]));
+    const profiles = proxies.map(p => {
+        const awg = p['amnezia-wg-option'] && typeof p['amnezia-wg-option'] === 'object' ? p['amnezia-wg-option'] : {};
+        const num = v => (Number.isFinite(v) ? v : (/^\d+$/.test(String(v ?? '')) ? parseInt(v, 10) : null));
+        const cpaRaw = String(awg['content-padding-addition'] || '').trim();
+        const cpaRange = cpaRaw.match(/^(\d+)-(\d+)$/);
+        return {
+            name: p.name,
+            dialer: typeof p['dialer-proxy'] === 'string' && p['dialer-proxy'].trim() ? p['dialer-proxy'].trim() : null,
+            importedMtu: Number.isFinite(p.mtu) && p.mtu > 0 ? p.mtu : null,
+            s4: num(awg.s4) || 0,
+            cpaMin: cpaRange ? parseInt(cpaRange[1], 10) : (num(cpaRaw) !== null ? num(cpaRaw) : null),
+            cpaMax: cpaRange ? parseInt(cpaRange[2], 10) : (num(cpaRaw) !== null ? num(cpaRaw) : null),
+            cpaSet: !!cpaRaw,
+            rt: awg['random-trailers'] === true,
+        };
+    });
+    const byProfile = new Map(profiles.map(p => [p.name, p]));
+    const PRACTICAL_MIN = 576; // практичный минимум inner IPv4 MTU (RFC 791 min 68; 576 — sanity-уровень)
+
+    const memo = new Map();
+    const visiting = new Set();
+    function plan(name) {
+        if (memo.has(name)) return memo.get(name);
+        if (visiting.has(name)) {
+            const r = { name, confidence: 'cycle', ceiling: null, effective: null, reason: ['цикл dialer-proxy — считается authoritative cycle detection при сборке'] };
+            memo.set(name, r);
+            return r;
+        }
+        visiting.add(name);
+        const pr = byProfile.get(name);
+        const r = { name, chain: [name], confidence: 'proven', ceiling: null, effective: null, overhead: null, reason: [] };
+        if (!pr) {
+            r.confidence = 'unknown';
+            r.reason.push('профиль не найден в конфиге');
+            memo.set(name, r);
+            return r;
+        }
+        r.importedMtu = pr.importedMtu;
+        const cpaMinB = pr.cpaSet ? (pr.cpaMin ?? 0) : 0;
+        // per-hop worst-case = 32 (WG hdr+tag) + 15 (align) + 28 (inner IP/UDP) = 75,
+        // плюс S4/CPA-max как пер-пакетные байты. Align считается РОВНО ОДИН РАЗ.
+        let ovhMax;
+        if (pr.cpaSet) {
+            ovhMax = pr.s4 + (pr.cpaMax ?? 0);
+        } else if (pr.rt) {
+            ovhMax = null; // RandomTrailers: граница не выводится из конфига
+        } else {
+            ovhMax = pr.s4;
+        }
+        r.overhead = {
+            min: 32 + pr.s4 + cpaMinB,
+            max: 32 + (ovhMax !== null ? ovhMax + 15 : null),
+            deterministic: pr.cpaSet || !pr.rt,
+        };
+        const dialer = pr.dialer;
+        if (!dialer) {
+            r.reason.push('outermost: транспорт — физический интерфейс');
+            r.effective = pr.importedMtu !== null ? pr.importedMtu : 1408; // 1408 — Mihomo default (source-pinned)
+            r.mtuSource = pr.importedMtu !== null ? 'imported' : 'engine-default';
+        } else if (!byProfile.has(dialer)) {
+            r.confidence = 'stopped';
+            r.reason.push('MTU chain analysis stops at non-WG/AWG dialer target «' + dialer + '»');
+            r.effective = pr.importedMtu;
+        } else {
+            const outer = plan(dialer);
+            r.chain = [name].concat(outer.chain || []);
+            if (outer.confidence !== 'proven' || outer.effective === null || ovhMax === null) {
+                r.confidence = outer.confidence !== 'proven' ? outer.confidence : 'unknown';
+                r.effective = pr.importedMtu;
+                if (ovhMax === null) r.reason.push('AWG RandomTrailers: строгая верхняя граница overhead не выводится из конфига — расчёт остановлен, исходный MTU сохранён');
+                if (outer.confidence !== 'proven') {
+                    r.reason.push('внешний hop «' + dialer + '» не имеет доказанного бюджета');
+                    (outer.reason || []).forEach(rs => r.reason.push('↳ ' + rs)); // проброс причин (в т.ч. ниже-минимум)
+                }
+            } else {
+                // worst-case IPv4: inner_A + align(15) + 32 + S4 + CPA-max + 28 (inner IP+UDP) ≤ MTU_B
+                r.ceiling = outer.effective - (32 + (ovhMax !== null ? ovhMax : 15) + 15 + 28);
+                if (r.ceiling < PRACTICAL_MIN) {
+                    r.confidence = 'error';
+                    r.effective = pr.importedMtu;
+                    r.reason.push('цепочка требует MTU ' + r.ceiling + ' — ниже практичного минимума ' + PRACTICAL_MIN);
+                } else {
+                    r.effective = pr.importedMtu !== null ? Math.min(pr.importedMtu, r.ceiling) : r.ceiling;
+                    r.mtuSource = 'planned-ceiling';
+                    r.reason.push('dialer-proxy: ' + dialer, 'outer effective MTU: ' + outer.effective, 'IPv4 worst-case per hop: 60 (32 + align 15 + inner IP/UDP 28)');
+                }
+            }
+        }
+        visiting.delete(name);
+        memo.set(name, r);
+        return r;
+    }
+    const out = profiles.map(p => plan(p.name));
+    return { profiles: out, note: 'diagnostics-only: YAML/mtu не изменяются' };
 }
 
 export {
     parseWireGuardConf,
+    normalizeWireGuardIpv4Only,
+    validateWireGuardIpv4Only,
+    computeAmneziaTagJunkSize,
+    analyzeWireGuardProfile,
+    planWireGuardMtu,
 };

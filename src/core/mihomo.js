@@ -1,4 +1,5 @@
 import { computeTag, validateBean, PROXY_FETCH_INTERVAL, SUB_REFRESH_INTERVAL, resolveUrlTest, resolveUrlTestExpectedStatus, generateSecretHex32 } from '../main.js';
+import { normalizeWireGuardIpv4Only, validateWireGuardIpv4Only } from './wireguard.js';
 
 const FASTEST_GROUP_NAME = '⚡ Fastest';
 const GLOBAL_GROUP_NAME = 'GLOBAL';
@@ -552,8 +553,8 @@ function buildMihomoProxy(bean) {
                 httpOpts.path = [s.path].filter(Boolean);
             }
             if (s.host) {
-                httpOpts.headers = { 
-                    Host: Array.isArray(s.host) ? s.host : [s.host] 
+                httpOpts.headers = {
+                    Host: Array.isArray(s.host) ? s.host : [s.host]
                 };
             }
             obj['http-opts'] = httpOpts;
@@ -686,7 +687,13 @@ function buildMihomoProxy(bean) {
     }
     if (bean.proto === 'wireguard') {
         const wg = bean.wireguard || {};
-        const peers = Array.isArray(wg.peers) ? wg.peers : [];
+        // IPv4-only contract (link-generators v1.8.0): нормализация на build-слое,
+        // парсер остаётся faithful. Жёсткая часть — reject вместо молчаливой порчи:
+        // IPv6-only interface address и IPv6 literal endpoint несовместимы с контрактом.
+        const validation = validateWireGuardIpv4Only(bean);
+        if (!validation.ok) throw new Error(validation.reason);
+        const ipv4 = normalizeWireGuardIpv4Only(wg);
+        const peers = Array.isArray(ipv4.peers) ? ipv4.peers : [];
         const hasPeers = peers.length > 0;
         const mapPeer = (peer) => {
             if (!peer || typeof peer !== 'object') return null;
@@ -705,21 +712,35 @@ function buildMihomoProxy(bean) {
             'private-key': wg.privateKey,
             udp: true,
         };
-        if (wg.ip) p.ip = wg.ip;
-        if (wg.ipv6) p.ipv6 = wg.ipv6;
+        if (ipv4.ip) p.ip = ipv4.ip;
         if (wg.publicKey) p['public-key'] = wg.publicKey;
         if (wg.preSharedKey) p['pre-shared-key'] = wg.preSharedKey;
-        if (Array.isArray(wg.allowedIPs) && wg.allowedIPs.length) p['allowed-ips'] = wg.allowedIPs;
+        if (Array.isArray(ipv4.allowedIPs) && ipv4.allowedIPs.length) p['allowed-ips'] = ipv4.allowedIPs;
         if (Number.isFinite(wg.mtu)) p.mtu = wg.mtu;
         if (Number.isFinite(wg.persistentKeepalive) && wg.persistentKeepalive > 0) p['persistent-keepalive'] = wg.persistentKeepalive;
         if (wg.reserved !== undefined) p.reserved = wg.reserved;
+        // Контракт: endpoint-транспорт WG/AWG всегда резолвится в IPv4
+        // (hostname не должен молча уйти в AAAA; applyCommon ниже не перезапишет —
+        // bean.ipVersion у dual-stack пуст после нормализации интерфейса).
+        p['ip-version'] = 'ipv4';
                 // Per-profile dialer assignment (consumer sets it from the profile's
                 // connection mode). Global wgDialerProxy stamping never overwrites it.
                 if (typeof wg.dialerProxy === 'string' && wg.dialerProxy.trim()) p['dialer-proxy'] = wg.dialerProxy.trim();
         if (hasPeers) p.peers = peers.map(mapPeer).filter(Boolean);
         if (wg.ipStack && typeof wg.ipStack === 'object' && Object.keys(wg.ipStack).length) p['ip-stack'] = wg.ipStack;
         if (wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object') {
-            p['amnezia-wg-option'] = wg['amnezia-wg-option'];
+            // no-silent-drop (NIGHT-06): INVALID/UNSUPPORTED значения НЕ эмитятся
+            // (mihomo отверг бы весь конфиг) — raw-факт остаётся в bean.awgFieldReport
+            // и показывается диагностикой на карточке профиля.
+            const badKeys = new Set((bean.awgFieldReport || [])
+                .filter(r => r.status === 'INVALID' || r.status === 'UNSUPPORTED')
+                .map(r => String(r.key).toLowerCase()));
+            const cleanOpt = {};
+            for (const [k, v] of Object.entries(wg['amnezia-wg-option'])) {
+                if (badKeys.has(String(k).toLowerCase())) continue;
+                cleanOpt[k] = v;
+            }
+            if (Object.keys(cleanOpt).length) p['amnezia-wg-option'] = cleanOpt;
         }
         applyCommon(p);
         return p;
