@@ -410,6 +410,24 @@ async function fetchSubscription(url, options = {}) {
     if (/\bproxies\s*:/i.test(body) && !looksLikeLinksList(body)) throw new Error('Clash YAML subscription is not supported here');
     const lines = splitLines(body);
     const filtered = lines.filter(line => allowedSchemes.has((line.split(':', 1)[0] || '').toLowerCase()));
+    // #158 (R1, honest-partial contract): строки, чью схему парсер не знает,
+    // сознательно отбрасываются — но реальный Mihomo может их загрузить. Потеря
+    // не должна быть невидимой: подписываемся детерминированным тегом с ЧИСЛОМ
+    // и категориями схем (никаких URI/содержимого). Потребитель (UI) показывает
+    // «preview может быть неполным» и направляет к Runtime Import (#159).
+    const dropped = lines.length - filtered.length;
+    if (dropped > 0) {
+        const unknownSchemes = [];
+        const seen = new Set();
+        for (const line of lines) {
+            const scheme = (line.split(':', 1)[0] || '').toLowerCase();
+            if (!allowedSchemes.has(scheme) && !seen.has(scheme)) {
+                seen.add(scheme);
+                unknownSchemes.push(scheme || '(empty)');
+            }
+        }
+        return filtered.join('\n') + '\n# link-generators: preview-partial (' + dropped + ' skipped; schemes: ' + unknownSchemes.join(',') + ')';
+    }
     return filtered.join('\n');
 }
 

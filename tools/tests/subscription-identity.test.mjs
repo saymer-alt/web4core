@@ -70,3 +70,23 @@ test('non-browser fetch failure keeps the plain direct-error classification (no 
         globalThis.fetch = originalFetch;
     }
 });
+
+test('preview-partial marker (#158): unknown-scheme lines are dropped, but the loss is reported', async () => {
+    const originalFetch = globalThis.fetch;
+    const payload = [
+        'vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443#Known',
+        'snell://192.0.2.2:6160?psk=testpsk#SnellNode',
+        'ssr://dGVzdA',
+        'vless://00000000-0000-4000-8000-000000000002@192.0.2.3:443#Known2'
+    ].join('\n');
+    globalThis.fetch = () => Promise.resolve(new Response(payload, { status: 200 }));
+    try {
+        const body = await fetchSubscription('https://example.com/sub');
+        assert.ok(body.includes('Known'), 'supported nodes survive');
+        assert.equal((body.match(/# link-generators: preview-partial \(2 skipped; schemes: snell,ssr\)/) || []).length, 1,
+            'loss marker with count and scheme categories: ' + body);
+        assert.ok(!body.includes('testpsk') && !body.includes('dGVzdA'), 'no dropped content in the marker');
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
