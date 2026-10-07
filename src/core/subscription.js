@@ -306,6 +306,14 @@ async function fetchSubscription(url, options = {}) {
             const htmlPass2 = await resolveHtmlProbe();
             if (htmlPass2) return htmlPass2;
 
+            // #158 (R2): Clash/Mihomo YAML-детект ДО отказа handleResponse — иначе
+            // payload тихо превратился бы в 'Subscription returned no valid links' /
+            // ушёл в fallback-цепочку, а честная причина формата терялась. Ошибка
+            // конкретна: consumer показывает точное сообщение вместо generic-сбоя.
+            if (/\bproxies\s*:/i.test(probe) && !looksLikeLinksList(probe) && !hasRealSubscriptionLinks(probe)) {
+                throw new Error('Clash YAML subscription is not supported here');
+            }
+
             if (hasRealSubscriptionLinks(probe)) return probe;
 
             const extractedGeneric = extractLinksFromText(probe);
