@@ -8,7 +8,9 @@ const HWID_RE = /^[A-Za-z0-9=-]{10,64}$/;
 const HEX32_RE = /^[0-9a-f]{32}$/;
 
 function providerHwids(yaml) {
-    return [...yaml.matchAll(/^\s+x-hwid:\s*\n\s+- ([A-Za-z0-9=-]+)$/gm)].map(m => m[1]);
+    // jsyaml цитирует число-подобные 32-hex значения (0b…/0x…/все цифры) —
+    // кавычки опциональны, иначе разбор флейпит в зависимости от random.
+    return [...yaml.matchAll(/^\s+x-hwid:\s*\n\s+- "?([A-Za-z0-9=-]+)"?\s*$/gm)].map(m => m[1]);
 }
 
 test('deviceHwid: one logical device -> every provider carries the same x-hwid', () => {

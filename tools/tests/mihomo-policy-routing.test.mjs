@@ -31,7 +31,10 @@ test('DPR off: buildFromRequest output stays byte-identical with and without the
     const opts = { mihomoSubscriptionMode: true };
     const without = buildFromRequest({ core: 'mihomo', input, options: { ...opts } });
     const withEmpty = buildFromRequest({ core: 'mihomo', input, options: { ...opts, mihomoDomainPolicy: [] } });
-    const scrub = (s) => s.replace(/^\s+- [0-9a-f]{32}$/gm, 'HWID');
+    // Случайный 32-hex может быть процитирован jsyaml (значение вида 0b…/0x…/
+    // число-подобное парсится неоднозначно, поэтому эмитится в кавычках) —
+    // нормализуем обе формы, иначе тест флейпит примерно 1 раз из 70.
+    const scrub = (s) => s.replace(/^\s+- "?[0-9a-f]{32}"?\s*$/gm, 'HWID');
     assert.equal(scrub(without.data), scrub(withEmpty.data));
     assert.ok(!without.data.includes('rule-providers:'));
 });
