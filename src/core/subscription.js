@@ -334,6 +334,15 @@ async function fetchSubscription(url, options = {}) {
             throw new Error(classifyError(direct.error || new Error('Fetch failed')));
         }
 
+        // Последняя ошибка fallback-этапа: без неё итоговое сообщение всегда
+        // описывало бы только прямой запрос, а реальная причина (например
+        // HTTP 5xx воркера) терялась. Сообщения classifyError не содержат URL.
+        let lastFallbackError = null;
+        const recordFallbackOutcome = (result) => {
+            if (result && result.error) lastFallbackError = result.error;
+            else if (result && typeof result.text === 'string') lastFallbackError = new Error('Subscription returned no valid links');
+        };
+
         if (direct.error) {
             if (/^HTTP\s+(403|429|5\d\d)/.test(String(direct.error.message || ''))) {
                 await sleep(350);
@@ -371,6 +380,7 @@ async function fetchSubscription(url, options = {}) {
                         const result = await tryFetch(makeUrl(u), attempt.attemptFor(u));
                         const resolved = await consumeFetchResult(result);
                         if (resolved) return resolved;
+                        recordFallbackOutcome(result);
                         // Legacy worker without the POST contract: stop
                         // retrying POST, fall through to GET immediately.
                         if (attempt.kind === 'post' && result.error && /^HTTP\s+4(0[05])\b/.test(String(result.error.message || ''))) break;
@@ -382,7 +392,11 @@ async function fetchSubscription(url, options = {}) {
             }
         }
 
-        throw new Error(classifyError(direct.error));
+        const directLabel = classifyError(direct.error);
+        const fallbackLabel = lastFallbackError ? classifyError(lastFallbackError) : null;
+        throw new Error(fallbackLabel && fallbackLabel !== directLabel
+            ? ('Direct: ' + directLabel + '; Fallback: ' + fallbackLabel)
+            : directLabel);
     }
 
     let body = await fetchWithFallback(url, 0);
