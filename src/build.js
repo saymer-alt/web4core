@@ -337,7 +337,7 @@ export function buildFromRequest(req) {
     assertCoreSupports(extraBeans, core, 'Mihomo', options);
     applyRealityModernHosts(extraBeans, modernHosts);
 
-    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter, modernHosts, deviceModel: options.deviceModel, domainPolicy: options.domainPolicy});
+    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter, modernHosts, deviceModel: options.deviceModel, deviceHwid: options.deviceHwid, domainPolicy: options.domainPolicy});
     const yaml = buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, cfg.listeners, {
       addSocks,
       webUI,
