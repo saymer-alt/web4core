@@ -647,6 +647,139 @@ function planWireGuardMtu(doc) {
     return { profiles: out, note: 'diagnostics-only: YAML/mtu не изменяются' };
 }
 
+// === WG/AWG generation detection (#157) ===
+// Разделяет: (1) family, (2) generation, (3) валидность протокола, (4) математические
+// ограничения, (5) совместимость с целью. Это РАЗНЫЕ вещи; детектор отвечает только
+// за 1-2 и даёт diagnostics-заметки, НИКОГДА не меняет YAML и не угадывает версию.
+//
+// Матрица маркеров (evidence):
+// - отсутствие всех AWG-полей → WireGuard (SOURCE-PROVEN по отсутствию);
+// - jc/jmin/jmax/s1/s2/h1-h4 (одиночные) → AWG legacy/1.x (SOURCE-PROVEN: docs.amnezia.org
+//   классический набор; разбор amneziawg-go uapi.go);
+// - i1-i5 (CPS) / s3 / s4 → «Amnezia Premium»-семейство 1.5–2.x: H-диапазоны + CPS-теги;
+//   РАЗДЕЛИТЬ 1.5 и 2.x по конфигу доказанно НЕЛЬЗЯ → честный compatible-range
+//   (SOURCE-PROVEN docs/PROTOCOLS.md + UPSTREAM-OBSERVED реестр #136);
+// - header-protection-key / content-padding-addition / rekey-after-time / rekey-timeout /
+//   reject-after-time / keepalive-timeout / max-handshake-attempts → v3-семантика (≥3.0):
+//   реестр #136 различает 3.0 (есть HP) и 3.1 (добавлены feature flags) —
+//   UPSTREAM-OBSERVED; без 3.1-флагов точная версия недоказуема (3.1-конфиг может их
+//   не включать) → lower-bound 3.0, показываем «3.x»;
+// - random-trailers / disable-cookies → 3.1-only feature flags → exact 3.1
+//   (SOURCE-PROVEN: amneziawg-go uapi.go — параметры существуют; официальная документация
+//   AmneziaWG 3.1);
+// - j1-j3 / itime: в локальных источниках поколение НЕ доказано → non-discriminating
+//   маркеры (family даёт, версию не дают);
+// - version: 3 без v3/v3.1-capability маркеров → CONFLICT (не придумываем версию).
+// В evidence — только НАЗВАНИЯ capability-маркеров, никаких значений/секретов.
+const WG_GENERATION_MARKERS = {
+    classic: ['jc', 'jmin', 'jmax', 's1', 's2', 'h1', 'h2', 'h3', 'h4'],
+    premium: ['s3', 's4', 'i1', 'i2', 'i3', 'i4', 'i5'],
+    v3: ['header-protection-key', 'content-padding-addition', 'rekey-after-time', 'rekey-timeout', 'reject-after-time', 'keepalive-timeout', 'max-handshake-attempts'],
+    v31: ['random-trailers', 'disable-cookies'],
+    nonDiscriminating: ['j1', 'j2', 'j3', 'itime'],
+};
+
+function detectWireGuardGeneration(bean) {
+    // Профильный bean вкладывает опции в bean.wireguard (parseWireGuardConf);
+    // эмитированный YAML-прокси несёт их на верхнем уровне. Поддерживаем оба.
+    const src = bean && bean.wireguard && typeof bean.wireguard === 'object' ? bean.wireguard : (bean || {});
+    const awg = src['amnezia-wg-option'] && typeof src['amnezia-wg-option'] === 'object' ? src['amnezia-wg-option'] : {};
+    const present = (k) => awg[k] !== undefined && awg[k] !== null && String(awg[k]).trim() !== '';
+    const inSet = (set) => set.filter(present);
+
+    const classic = inSet(WG_GENERATION_MARKERS.classic);
+    const premium = inSet(WG_GENERATION_MARKERS.premium);
+    const v3 = inSet(WG_GENERATION_MARKERS.v3);
+    const v31 = inSet(WG_GENERATION_MARKERS.v31);
+    const extra = inSet(WG_GENERATION_MARKERS.nonDiscriminating);
+    const anyMarker = classic.length + premium.length + v3.length + v31.length + extra.length > 0 || present('version');
+
+    if (!anyMarker) {
+        return { family: 'wg', label: 'WireGuard', generation: null, confidence: 'exact', compatible: ['wg'], evidence: [], conflicts: [], notes: [] };
+    }
+
+    const evidence = [...v31, ...v3, ...premium, ...classic, ...extra];
+    const notes = [];
+    const conflicts = [];
+
+    // Diagnostics-only математические/ограничительные заметки. Ничего из этого
+    // не меняет YAML: proven — по amneziawg-go uapi.go, observed — реестр #136.
+    const uint16 = ['s1', 's2', 's3', 's4'];
+    for (const k of uint16) {
+        const v = awg[k];
+        if (typeof v === 'number' && v > 65535) {
+            notes.push({ level: 'SOURCE-PROVEN', text: k.toUpperCase() + ' вне uint16 (amneziawg-go ParseUint 16) — целевой движок отвергнет значение' });
+        }
+    }
+    for (const k of ['h1', 'h2', 'h3', 'h4']) {
+        const v = awg[k];
+        if (typeof v === 'string' && /^\d+$/.test(v.trim()) && Number(v) > 4294967295) {
+            notes.push({ level: 'UPSTREAM-OBSERVED', text: k.toUpperCase() + ' вне uint32 (реестр совместимости #136) — проверяется целевым движком' });
+        }
+    }
+    if (typeof awg.jc === 'number' && awg.jc > 10) {
+        notes.push({ level: 'UPSTREAM-OBSERVED', text: 'Jc > 10 — выше наблюденного клиентского лимита mihomo (реестр #136); протокол uint32, лимит проверяет целевой движок' });
+    }
+    if (present('header-protection-key')) {
+        notes.push({ level: 'SOURCE-PROVEN', text: 'header-protection требует достаточных S3/S4 и непересекающихся H1–H4 — точная проверка выполняется целевым движком (amneziawg-go: «S%d must be more then …»)' });
+    }
+
+    // Глубокая семантика (S≥nonce, пересечение H) — целевая совместимость, не детектор:
+    notes.push(targetCompatibilityNote({ hasV3: v3.length + v31.length > 0 }));
+
+    let generation, label, confidence, compatible;
+    if (v31.length) {
+        generation = '3.1';
+        label = 'AmneziaWG 3.1';
+        confidence = 'exact';
+        compatible = ['3.1'];
+    } else if (v3.length) {
+        generation = '3.x';
+        label = 'AmneziaWG 3.x (3.0–3.1 compatible)';
+        confidence = 'range';
+        compatible = ['3.0', '3.1'];
+    } else if (premium.length) {
+        generation = '1.5–2.x';
+        label = 'AmneziaWG 1.5–2.x';
+        confidence = 'range';
+        compatible = ['1.5', '2.x'];
+    } else {
+        generation = '1.x';
+        label = 'AmneziaWG 1.x (legacy)';
+        confidence = 'range';
+        compatible = ['1.x'];
+    }
+
+    if (present('version')) {
+        const v = String(awg.version);
+        const claimsV3 = v === '3';
+        if (claimsV3 && (v3.length + v31.length) === 0) {
+            conflicts.push('version: 3 заявлен, но v3/v3.1 capability-маркеров в профиле нет');
+        } else if (!claimsV3 && (v3.length + v31.length) > 0) {
+            conflicts.push('v3/v3.1 capability-маркеры присутствуют, но version=' + v);
+        }
+    }
+
+    if (conflicts.length) {
+        return { family: 'awg', label: 'AmneziaWG ?', generation: null, confidence: 'conflict', compatible: [], evidence, conflicts, notes };
+    }
+
+    return { family: 'awg', label, generation, confidence, compatible, evidence, conflicts, notes };
+}
+
+function targetCompatibilityNote({ hasV3 }) {
+    if (hasV3) {
+        return {
+            level: 'SOURCE-PROVEN',
+            text: 'v3-семантика требует Mihomo ≥ 1.19.30 (движок amneziav3); проектный минимум 1.19.31, рекомендуемый 1.19.32 — на старых ядрах 3.1-поля молча игнорируются'
+        };
+    }
+    return {
+        level: 'SOURCE-PROVEN',
+        text: 'legacy/1.x/1.5–2.x набор работает на legacy-движке всех поддерживаемых версий Mihomo (без 3.1-полей version: 3 не проставляется)'
+    };
+}
+
 export {
     parseWireGuardConf,
     normalizeWireGuardIpv4Only,
@@ -654,4 +787,5 @@ export {
     computeAmneziaTagJunkSize,
     analyzeWireGuardProfile,
     planWireGuardMtu,
+    detectWireGuardGeneration,
 };
