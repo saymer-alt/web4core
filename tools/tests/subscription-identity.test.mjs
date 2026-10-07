@@ -90,3 +90,17 @@ test('preview-partial marker (#158): unknown-scheme lines are dropped, but the l
         globalThis.fetch = originalFetch;
     }
 });
+
+test('Clash YAML payload (plain, direct 200) is rejected with the explicit format error (#158 R2)', async () => {
+    const originalFetch = globalThis.fetch;
+    const yaml = 'proxies:\n  - name: clash-node\n    type: ss\n    server: 203.0.113.70\n    port: 8388\n    cipher: aes-128-gcm\n    password: CLASHPASS\n';
+    globalThis.fetch = () => Promise.resolve(new Response(yaml, { status: 200 }));
+    try {
+        await assert.rejects(
+            () => fetchSubscription('https://example.com/sub'),
+            (err) => /Clash YAML subscription is not supported here/.test(err.message) && !/CLASHPASS/.test(err.message)
+        );
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
