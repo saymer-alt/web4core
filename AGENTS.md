@@ -1,5 +1,17 @@
 # AGENTS.md - web4core fork for link-generators
 
+## Owner decision (2026-10-11): WORKING-FIRST / LICENSE AUDIT DEFERRED
+
+**PERSONAL, NON-COMMERCIAL PROJECT; PUBLIC SOURCE REPOSITORIES.** The owner prioritizes working builds, tested code, reliable releases and safety. Non-urgent license/NOTICE inventory has been deliberately deferred to [KAS backlog #126](https://github.com/saymer-alt/keenetic-auto-setup/issues/126).
+
+Instructions for all coding agents:
+- **Do not repeatedly ask the owner about the generic license-review backlog or stall unrelated working builds, releases, CI and deployments solely due to a missing attribution inventory in experimental WDTT.** Record a concrete new finding once in #126, then continue independent engineering work.
+- Preserve all existing LICENSE/copyright/NOTICE material. Public availability or non-commercial intent is **not** permission to distribute third-party code contrary to its terms. If a **specific** component cannot lawfully be redistributed, hold **that component's distribution**, state the concrete obstacle once, and do not disrupt unrelated existing products.
+- Keep technical safety and acceptance requirements fully active (secrets, authentication, ABI, rollback, port conflicts, restart storms, real hardware and server validation). No license-review shortcut grants production readiness.
+- No automatic merges, production `stable` changes, release publication or alteration of existing `latest` assets under this policy. Normal owner approval and CI rules still apply.
+- Resume deferred license clean-up only on a separate owner request or when a verified restriction makes a specific planned distribution action impossible.
+
+
 ## Repositories and branches
 
 - spatiumstas/web4core - upstream.
