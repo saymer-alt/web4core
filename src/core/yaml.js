@@ -167,7 +167,7 @@ function resolveMihomoTunStack(tunOpt) {
     return stack;
 }
 
-const MIHOMO_WG_DIALER_DEFAULT_GROUP = 'WARP-DIALER';
+const MIHOMO_WG_DIALER_DEFAULT_GROUP = 'SHARED-DIALER';
 
 // dialer-proxy contract (Mihomo >= 1.19.x, verified against v1.19.31 sources):
 // the value must name an existing proxy or proxy-group; the target's UDP relay

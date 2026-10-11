@@ -105,7 +105,7 @@ test('variant B: select group is created and WG dials through it', () => {
 test('variant B: default group name when target omitted', () => {
   const yaml = build(['vless://' + UUID + '@192.0.2.1:443#VPS-DK'], [WARP_CONF],
     { wgDialerProxy: '', wgDialerGroupMembers: ['VPS-DK'] });
-  assert.ok(/dialer-proxy: WARP-DIALER/.test(proxyBlock(yaml, 'WARP')));
+  assert.ok(/dialer-proxy: SHARED-DIALER/.test(proxyBlock(yaml, 'WARP')));
 });
 
 test('variant B: unknown member rejected', () => {
@@ -192,7 +192,7 @@ test('variant C: members and providers combine into one group (proxies + use)', 
 
 test('variant C: default group name when target omitted', () => {
   const yaml = subBuild({ wgDialerProviders: [GEO_URL] });
-  assert.ok(/- name: WARP-DIALER\s*\n\s*type: select\s*\n\s*use:/.test(yaml));
+  assert.ok(/- name: SHARED-DIALER\s*\n\s*type: select\s*\n\s*use:/.test(yaml));
 });
 
 test('variant C: unknown provider URL fails closed', () => {
@@ -504,18 +504,18 @@ test('explicit bean assignment wins over global wgDialerProxy stamping', () => {
 test('wgDialerGroupOnly: dialer group built, no global stamping', () => {
   const beans = [
     parseWireGuardConf(SE2_CONF, 'HOME'),
-    beanWithDialer(WARP_CONF, 'WARP-SE', 'WARP-DIALER'),
+    beanWithDialer(WARP_CONF, 'WARP-SE', 'SHARED-DIALER'),
   ];
   const yaml = buildFromRequest({
     core: 'mihomo', input: [], wgBeans: beans,
     options: Object.assign({}, opts, { wgDialerGroupMembers: ['HOME'], wgDialerGroupOnly: true }),
   }).data;
-  const groupBlock = yaml.match(/  - name: WARP-DIALER[\s\S]*?(?=  - name: |proxy-groups:)/);
-  assert.ok(groupBlock, 'WARP-DIALER group built');
+  const groupBlock = yaml.match(/  - name: SHARED-DIALER[\s\S]*?(?=  - name: |proxy-groups:)/);
+  assert.ok(groupBlock, 'SHARED-DIALER group built');
   assert.match(groupBlock[0], /type: select/);
   assert.match(groupBlock[0], /- HOME/);
   assert.ok(!proxyBlock(yaml, 'HOME').includes('dialer-proxy'), 'no global stamping');
-  assert.match(proxyBlock(yaml, 'WARP-SE'), /dialer-proxy: WARP-DIALER/, 'bean assignment intact');
+  assert.match(proxyBlock(yaml, 'WARP-SE'), /dialer-proxy: SHARED-DIALER/, 'bean assignment intact');
 });
 
 test('wgDialerGroupOnly without members/providers: nothing built, no error', () => {
@@ -559,4 +559,14 @@ test('priority mode: dialer-proxy target BEFORE dialed proxy also rewritten', ()
     { beans: [], subUrls: [] }, {});
   const dialed = cfg.proxies.find(p => p.name.endsWith('WARP-SE'));
   assert.equal(dialed['dialer-proxy'], 'PRIMARY-1: VPS-SE');
+});
+
+// UX54: new implicit default; explicit historical name is still a supported target.
+test('UX54 neutral shared default and explicit legacy', () => {
+  for (const name of ['', 'WARP-DIALER', 'SHARED-DIALER']) {
+    const yaml = build([`vless://${UUID}@192.0.2.1:443#VPS`], [WARP_CONF], {wgDialerProxy:name,wgDialerGroupMembers:['VPS']});
+    const expected=name || 'SHARED-DIALER';
+    assert.ok(yaml.includes('- name: '+expected));
+    assert.match(proxyBlock(yaml,'WARP'),new RegExp('dialer-proxy: '+expected));
+  }
 });
