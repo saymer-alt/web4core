@@ -248,11 +248,6 @@ function resolveMihomoWgDialer(proxies, groups, providers, opts) {
 
 function applyMihomoWgDialer(proxies, dialer) {
     if (!dialer || dialer.stampAll === false) return proxies;
-    // No-DIRECT egress invariant (link-generators #284): the token
-    // `dialer-proxy: DIRECT` is never emitted. Omitting the field is
-    // semantically identical (a WG handshake without a dialer-proxy dials
-    // directly), so a DIRECT target normalizes to no stamping.
-    if (dialer.target === 'DIRECT') return proxies;
     let applied = 0;
     let explicit = 0;
     const out = (Array.isArray(proxies) ? proxies : []).map((p) => {

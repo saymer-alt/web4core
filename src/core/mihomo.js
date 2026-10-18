@@ -733,11 +733,10 @@ function buildMihomoProxy(bean) {
         p['ip-version'] = 'ipv4';
                 // Per-profile dialer assignment (consumer sets it from the profile's
                 // connection mode). Global wgDialerProxy stamping never overwrites it.
-                // No-DIRECT egress invariant (link-generators #284): the token
-                // `dialer-proxy: DIRECT` is never emitted — omitting the field is
-                // semantically identical (the WG handshake dials directly without
-                // a dialer), so a DIRECT target normalizes to no stamping.
-                if (typeof wg.dialerProxy === 'string' && wg.dialerProxy.trim() && wg.dialerProxy.trim() !== 'DIRECT') p['dialer-proxy'] = wg.dialerProxy.trim();
+                // `dialer-proxy: DIRECT` is service/transport plane (the WG handshake
+                // dials directly — how the proxy connection itself is established),
+                // not user-traffic egress: emitted verbatim (no-DIRECT #284 revised).
+                if (typeof wg.dialerProxy === 'string' && wg.dialerProxy.trim()) p['dialer-proxy'] = wg.dialerProxy.trim();
         if (hasPeers) p.peers = peers.map(mapPeer).filter(Boolean);
         if (wg.ipStack && typeof wg.ipStack === 'object' && Object.keys(wg.ipStack).length) p['ip-stack'] = wg.ipStack;
         if (wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object') {
@@ -1022,13 +1021,13 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         const deviceModel = typeof opts?.deviceModel === 'string' ? opts.deviceModel.trim() : '';
         providers[providerName] = {
             type: 'http',
-            // Provider bootstrap transport (download-only, never referenced by
-            // groups or rules): mihomo routes provider fetches through the
-            // config rule chain when `proxy` is absent — verified on v1.19.31
-            // (MATCH,GLOBAL over an empty provider-backed group ⇒ immediate
-            // EOF, provider never loads; explicit DIRECT dial loads normally).
-            // The link-generators Builder blocks this mode under the no-DIRECT
-            // egress invariant (issue #284) instead of emitting such YAML.
+            // Service/transport plane (no-DIRECT #284 revised): the explicit
+            // direct dial is the provider bootstrap transport — mihomo routes
+            // provider fetches through the config rule chain when `proxy` is
+            // absent (verified on v1.19.31: empty provider-backed GLOBAL ⇒
+            // immediate EOF, cold-start deadlock; explicit DIRECT dial loads
+            // normally). Download-only: never referenced by user-traffic
+            // groups or rules.
             proxy: 'DIRECT',
             header: {
                 'x-hwid': [deviceHwid || generateSecretHex32()],

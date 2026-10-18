@@ -1,16 +1,21 @@
-// No-DIRECT egress invariant (link-generators #284 / owner decision 2026-10-18):
-// the generator never emits the token DIRECT into generated YAML. Group
-// members, rules and fallback slots terminate in REJECT; an explicit DIRECT
-// domain-policy target fails the build fail-closed (both build layers); a
-// DIRECT dialer-proxy target normalizes to an omitted field (semantically
-// identical: a WG handshake without a dialer dials directly).
+// No-DIRECT egress invariant (link-generators #284, owner decision revised
+// 2026-10-18): the generator must not create routes through which USER traffic
+// silently egresses the host/VPS public IP; with no allowed egress left the
+// build fails closed (REJECT / dial failure), never a host-IP fallback.
 //
-// Known documented exception (bootstrap-only, consumer-blocked): subscription
-// proxy-providers keep `proxy: DIRECT` as the download transport — mihomo
-// routes provider fetches through the rule chain when the field is absent
-// (verified on v1.19.31: MATCH,GLOBAL over an empty provider-backed group ⇒
-// immediate EOF, provider never loads). The link-generators Builder blocks
-// that mode under the invariant instead of emitting such YAML.
+// User data plane (banned as DIRECT target/member):
+//   - DPR category groups terminate in REJECT (never a DIRECT escape slot);
+//   - an explicit DIRECT domain-policy target fails the build fail-closed
+//     (both build layers).
+// Service/control/transport plane (allowed, judged by purpose):
+//   - subscription providers keep `proxy: DIRECT` as the download bootstrap —
+//     mihomo routes provider fetches through the rule chain when the field is
+//     absent (verified on v1.19.31: MATCH,GLOBAL over an empty provider-backed
+//     group ⇒ immediate EOF, provider never loads);
+//   - `dialer-proxy: DIRECT` (a WG handshake dialing directly) is emitted
+//     verbatim — connection establishment, not user-traffic routing.
+// The link-generators page layer enforces the policy at the UI (no DIRECT
+// target options, legacy-card gate) — see the consumer suites.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildMihomoSubscriptionConfig, buildMihomoConfig, buildMihomoPriorityConfig } from '../../src/core/mihomo.js';
@@ -144,7 +149,7 @@ test('no-DIRECT: DPR priority-mode cards terminate in REJECT', () => {
     assertNoDirectYaml(buildMihomoYaml(cfg.proxies, cfg.groups, null, cfg.rules, [], { ruleProviders: cfg.ruleProviders }), 'DPR priority');
 });
 
-test('no-DIRECT: dialer-proxy DIRECT (bean level) normalizes to omitted field', () => {
+test('no-DIRECT: dialer-proxy DIRECT (service plane) is emitted verbatim — baseline parity', () => {
     const wgBean = {
         name: 'WG-A',
         proto: 'wireguard',
@@ -165,20 +170,9 @@ test('no-DIRECT: dialer-proxy DIRECT (bean level) normalizes to omitted field', 
         options: { addTun: false, addSocks: true, webUI: false },
     });
     assert.equal(res.kind, 'yaml');
-    assert.ok(!res.data.includes('dialer-proxy'), 'no dialer-proxy stamped for a DIRECT target');
-    assertNoDirectYaml(res.data, 'wg dialer DIRECT');
-});
-
-test('no-DIRECT: dialer-proxy DIRECT (global option) normalizes to omitted field', () => {
-    const cfg = buildMihomoConfig([], { wgDialerProxy: 'DIRECT' });
-    const yaml = buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, { wgDialerProxy: 'DIRECT' });
-    assert.ok(!yaml.includes('dialer-proxy'), 'global DIRECT dialer stamps nothing');
-    // And with real wireguard proxies the same option stays a no-op.
-});
-
-test('no-DIRECT: subscription providers keep the documented bootstrap field (consumer-blocked mode)', () => {
-    const cfg = buildMihomoSubscriptionConfig(['https://subs.example.invalid/token'], [], {});
-    for (const provider of Object.values(cfg.providers)) {
-        assert.equal(provider.proxy, 'DIRECT', 'documented download-only bootstrap (see header comment)');
-    }
+    // Connection establishment is service plane: the handshake dials directly,
+    // user traffic still flows through the tunnel (GLOBAL → REJECT-terminated).
+    assert.ok(res.data.includes("dialer-proxy: 'DIRECT'") || res.data.includes('dialer-proxy: DIRECT'),
+        'dialer-proxy DIRECT preserved (service plane)');
+    assert.ok(!/^\s*-\s+DIRECT\s*$/m.test(res.data.split('rules:')[1] || ''), 'no DIRECT in routing rules');
 });
