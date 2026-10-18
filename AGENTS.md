@@ -1,5 +1,11 @@
 # AGENTS.md — web4core
 
+## Composition-first owner model: simple bricks, complex systems
+
+The owner's preferred method is to assemble sophisticated behavior from **simple, autonomous, replaceable components**. Each 'brick' performs one narrow job well; the **architect** designs the graph, interfaces, fallback and failure paths. No brick needs the full-system mental model. This is a general design pattern across the owner's water plumbing, three-phase electrical panel, camera→ring-buffer NVR→streaming device→CRT TV, and independent Mihomo/VPS layers—not merely a VPN optimization trick.
+
+For engine work: identify the small components, their stable input/output contracts, local choices and failure boundaries, then test each plus their integration. Preserve modularity and runtime behavior; don't make upstream parsers, proxy generators, OS bridges or inbound services into one 'smart' omniscient orchestrator. When a cross-layer contract is unclear, ask the owner rather than implementing destructive literal compliance.
+
 ## Owner architecture contract: independent autonomous layers (2026-10-18)
 
 The owner is an architect of complex, multi-layer abstraction systems. **Autonomous layers** are an intentional design, not accidental duplication. Respect them when implementing Mihomo/YAML generation, engine rules and integration adapters.
