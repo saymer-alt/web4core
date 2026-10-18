@@ -132,15 +132,19 @@ function applyRealityModernHosts(beans, modernHosts) {
 // conflicts belong to the engine (core/mihomo.js), which reports skipped lines
 // as non-blocking warnings instead of failing the build.
 // Policy rule target (DPR v2): SELECT = legacy per-policy select group;
-// GLOBAL/DIRECT/REJECT route the whole policy rule at the builtin target
+// GLOBAL/REJECT route the whole policy rule at the builtin target
 // without creating a category group. Absent/empty preserves legacy output.
-const DOMAIN_POLICY_TARGETS = new Set(['SELECT', 'GLOBAL', 'DIRECT', 'REJECT']);
+// DIRECT is forbidden by the no-DIRECT egress invariant (link-generators
+// issue #284): an explicit DIRECT policy target fails the build fail-closed
+// instead of emitting a direct-egress rule.
+const DOMAIN_POLICY_TARGETS = new Set(['SELECT', 'GLOBAL', 'REJECT']);
 
 function normalizePolicyTarget(value) {
   const t = String(value === undefined || value === null ? '' : value).trim().toUpperCase();
   if (!t) return 'SELECT';
+  if (t === 'DIRECT') throw new Error('Mihomo: domain policy target DIRECT is forbidden (no-DIRECT egress invariant, link-generators #284) - use SELECT, GLOBAL or REJECT');
   if (DOMAIN_POLICY_TARGETS.has(t)) return t;
-  throw new Error('Mihomo: domain policy target must be SELECT, GLOBAL, DIRECT or REJECT: "' + value + '"');
+  throw new Error('Mihomo: domain policy target must be SELECT, GLOBAL or REJECT: "' + value + '"');
 }
 
 function normalizeDomainPolicy(raw) {

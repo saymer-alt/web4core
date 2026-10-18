@@ -250,16 +250,20 @@ function buildDomainPolicyArtifacts(policies, ctx) {
         const slug = domainPolicySlug(name, index, usedSlugs);
         ruleProviders[slug] = { type: 'inline', behavior: 'classical', format: 'yaml', payload };
         // Policy rule target (DPR v2): SELECT keeps the legacy per-policy
-        // category group; GLOBAL/DIRECT/REJECT point the whole policy rule
-        // at the builtin target without creating any group.
+        // category group; GLOBAL/REJECT point the whole policy rule at the
+        // builtin target without creating any group.
         const rawTarget = String(policy?.target || '').trim().toUpperCase();
         // Engine-level strictness: direct callers (tests/tools) bypass the
         // upstream normalization, so an unknown target must not silently
-        // degrade to legacy SELECT semantics.
-        if (rawTarget !== '' && rawTarget !== 'SELECT' && rawTarget !== 'GLOBAL' && rawTarget !== 'DIRECT' && rawTarget !== 'REJECT') {
-            throw new Error(`Mihomo: domain policy target must be SELECT, GLOBAL, DIRECT or REJECT: "${rawTarget}"`);
+        // degrade to legacy SELECT semantics. DIRECT is forbidden by the
+        // no-DIRECT egress invariant (link-generators #284) — fail closed.
+        if (rawTarget === 'DIRECT') {
+            throw new Error(`Mihomo: domain policy "${name}" target DIRECT is forbidden (no-DIRECT egress invariant, link-generators #284) — use SELECT, GLOBAL or REJECT`);
         }
-        const ruleTarget = rawTarget === 'GLOBAL' || rawTarget === 'DIRECT' || rawTarget === 'REJECT' ? rawTarget : 'SELECT';
+        if (rawTarget !== '' && rawTarget !== 'SELECT' && rawTarget !== 'GLOBAL' && rawTarget !== 'REJECT') {
+            throw new Error(`Mihomo: domain policy target must be SELECT, GLOBAL or REJECT: "${rawTarget}"`);
+        }
+        const ruleTarget = rawTarget === 'GLOBAL' || rawTarget === 'REJECT' ? rawTarget : 'SELECT';
         if (ruleTarget === 'SELECT') {
             rules.push(`RULE-SET,${slug},${name}`);
         } else {
@@ -283,7 +287,9 @@ function buildDomainPolicyArtifacts(policies, ctx) {
                 // ⚡ Fastest is referenced only when it is actually emitted
                 // (a single-static config emits no Fastest group; referencing
                 // it would produce a dangling group target).
-                proxies: [`${name}-AUTO`, ...(existingGroups.has(FASTEST_GROUP_NAME) ? [FASTEST_GROUP_NAME] : []), GLOBAL_GROUP_NAME, 'DIRECT']
+                // The trailing member is the fail-closed escape slot: REJECT,
+                // never DIRECT (no-DIRECT egress invariant, link-generators #284).
+                proxies: [`${name}-AUTO`, ...(existingGroups.has(FASTEST_GROUP_NAME) ? [FASTEST_GROUP_NAME] : []), GLOBAL_GROUP_NAME, 'REJECT']
             });
             existingGroups.add(`${name}-AUTO`);
         } else if (ctx.mode === 'static') {
@@ -291,15 +297,17 @@ function buildDomainPolicyArtifacts(policies, ctx) {
                 name,
                 type: 'select',
                 // ⚡ Fastest is referenced only when it is actually emitted (see above).
-                proxies: [...(existingGroups.has(FASTEST_GROUP_NAME) ? [FASTEST_GROUP_NAME] : []), GLOBAL_GROUP_NAME, 'DIRECT']
+                // Trailing escape slot = REJECT (no-DIRECT egress invariant, #284).
+                proxies: [...(existingGroups.has(FASTEST_GROUP_NAME) ? [FASTEST_GROUP_NAME] : []), GLOBAL_GROUP_NAME, 'REJECT']
             });
         } else {
             // AUTO-WHITELIST priority mode: the allowed chain is
             // RULE-SET → policy select → GLOBAL → existing flat fallback.
+            // Trailing escape slot = REJECT (no-DIRECT egress invariant, #284).
             groups.push({
                 name,
                 type: 'select',
-                proxies: [GLOBAL_GROUP_NAME, 'DIRECT']
+                proxies: [GLOBAL_GROUP_NAME, 'REJECT']
             });
         }
         existingGroups.add(name);
@@ -725,7 +733,11 @@ function buildMihomoProxy(bean) {
         p['ip-version'] = 'ipv4';
                 // Per-profile dialer assignment (consumer sets it from the profile's
                 // connection mode). Global wgDialerProxy stamping never overwrites it.
-                if (typeof wg.dialerProxy === 'string' && wg.dialerProxy.trim()) p['dialer-proxy'] = wg.dialerProxy.trim();
+                // No-DIRECT egress invariant (link-generators #284): the token
+                // `dialer-proxy: DIRECT` is never emitted — omitting the field is
+                // semantically identical (the WG handshake dials directly without
+                // a dialer), so a DIRECT target normalizes to no stamping.
+                if (typeof wg.dialerProxy === 'string' && wg.dialerProxy.trim() && wg.dialerProxy.trim() !== 'DIRECT') p['dialer-proxy'] = wg.dialerProxy.trim();
         if (hasPeers) p.peers = peers.map(mapPeer).filter(Boolean);
         if (wg.ipStack && typeof wg.ipStack === 'object' && Object.keys(wg.ipStack).length) p['ip-stack'] = wg.ipStack;
         if (wg['amnezia-wg-option'] && typeof wg['amnezia-wg-option'] === 'object') {
@@ -1010,6 +1022,13 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         const deviceModel = typeof opts?.deviceModel === 'string' ? opts.deviceModel.trim() : '';
         providers[providerName] = {
             type: 'http',
+            // Provider bootstrap transport (download-only, never referenced by
+            // groups or rules): mihomo routes provider fetches through the
+            // config rule chain when `proxy` is absent — verified on v1.19.31
+            // (MATCH,GLOBAL over an empty provider-backed group ⇒ immediate
+            // EOF, provider never loads; explicit DIRECT dial loads normally).
+            // The link-generators Builder blocks this mode under the no-DIRECT
+            // egress invariant (issue #284) instead of emitting such YAML.
             proxy: 'DIRECT',
             header: {
                 'x-hwid': [deviceHwid || generateSecretHex32()],

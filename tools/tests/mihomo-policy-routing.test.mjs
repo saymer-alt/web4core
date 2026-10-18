@@ -56,7 +56,8 @@ test('DPR basic: rule-providers, category groups over the shared provider, rules
         assert.equal(auto['empty-fallback'], 'REJECT');
         const select = byName[policy];
         assert.equal(select.type, 'select');
-        assert.deepEqual(select.proxies, [`${policy}-AUTO`, '⚡ Fastest', 'GLOBAL', 'DIRECT']);
+        // Trailing escape slot = REJECT, never DIRECT (no-DIRECT egress, #284).
+        assert.deepEqual(select.proxies, [`${policy}-AUTO`, '⚡ Fastest', 'GLOBAL', 'REJECT']);
         const provider = cfg.ruleProviders[slug];
         assert.equal(provider.type, 'inline');
         assert.equal(provider.behavior, 'classical');
@@ -68,7 +69,7 @@ test('DPR basic: rule-providers, category groups over the shared provider, rules
     assert.ok(groupOrder.indexOf('GLOBAL') > groupOrder.indexOf('MEDIA'), 'GLOBAL stays the last group');
 });
 
-test('DPR shared provider: several AUTO groups use one provider; provider contract keeps proxy: DIRECT', () => {
+test('DPR shared provider: several AUTO groups use one provider; documented bootstrap field kept at engine level', () => {
     const cfg = buildMihomoSubscriptionConfig(
         ['https://a.example.invalid/s1', 'https://b.example.org/s2'],
         [],
@@ -79,8 +80,11 @@ test('DPR shared provider: several AUTO groups use one provider; provider contra
     const autoGroups = cfg.groups.filter(g => g.name.endsWith('-AUTO'));
     assert.equal(autoGroups.length, 2);
     for (const group of autoGroups) assert.deepEqual(group.use, providerNames);
-    // Provider contract (PoC-proven cold-start deadlock without it): every
-    // subscription provider must keep proxy: DIRECT, DPR or not.
+    // Provider bootstrap contract (PoC-proven cold-start deadlock without the
+    // explicit direct dial: mihomo routes the fetch through the rule chain →
+    // empty GLOBAL → REJECT ⇒ EOF). The engine keeps the documented
+    // download-only field; the link-generators Builder blocks this mode under
+    // the no-DIRECT egress invariant (#284) instead of emitting such YAML.
     for (const provider of Object.values(cfg.providers)) assert.equal(provider.proxy, 'DIRECT');
     const plain = buildMihomoSubscriptionConfig(subUrls, [], {});
     for (const provider of Object.values(plain.providers)) assert.equal(provider.proxy, 'DIRECT');
@@ -211,7 +215,7 @@ test('DPR static mode: category selects over Fastest/GLOBAL, no AUTO groups', ()
     const groups = cfg['proxy-groups'];
     const byName = Object.fromEntries(groups.map(g => [g.name, g]));
     assert.equal(byName.AI.type, 'select');
-    assert.deepEqual(byName.AI.proxies, ['⚡ Fastest', 'GLOBAL', 'DIRECT']);
+    assert.deepEqual(byName.AI.proxies, ['⚡ Fastest', 'GLOBAL', 'REJECT']);
     assert.ok(!groups.some(g => g.name.endsWith('-AUTO')));
     assert.deepEqual(cfg.rules, ['RULE-SET,policy-ai,AI', 'RULE-SET,policy-media,MEDIA', 'MATCH,GLOBAL']);
     assert.deepEqual(Object.keys(cfg['rule-providers']), ['policy-ai', 'policy-media']);
@@ -242,8 +246,8 @@ test('DPR × AUTO-WHITELIST: flat fallback untouched, policy selects point at GL
     assert.ok(!(globalGroup.proxies || []).some(n => n === 'AI' || n === 'MEDIA' || n.endsWith('-AUTO')),
         'no policy/AUTO names inside the fallback (#2588 contract)');
     const byName = Object.fromEntries(cfg.groups.map(g => [g.name, g]));
-    assert.deepEqual(byName.AI.proxies, ['GLOBAL', 'DIRECT']);
-    assert.deepEqual(byName.MEDIA.proxies, ['GLOBAL', 'DIRECT']);
+    assert.deepEqual(byName.AI.proxies, ['GLOBAL', 'REJECT']);
+    assert.deepEqual(byName.MEDIA.proxies, ['GLOBAL', 'REJECT']);
     assert.deepEqual(cfg.rules, ['RULE-SET,policy-ai,AI', 'RULE-SET,policy-media,MEDIA', 'MATCH,GLOBAL']);
     for (const provider of Object.values(cfg.providers)) assert.equal(provider.proxy, 'DIRECT');
 });
@@ -272,7 +276,7 @@ test('DPR static + single static proxy: category select must not reference missi
     const cfg = buildMihomoConfig([], { domainPolicy: policies });
     assert.ok(!cfg['proxy-groups'].some(g => g.name === '⚡ Fastest'), 'single static: no Fastest group emitted');
     const ai = cfg['proxy-groups'].find(g => g.name === 'AI');
-    assert.deepEqual(ai.proxies, ['GLOBAL', 'DIRECT']);
+    assert.deepEqual(ai.proxies, ['GLOBAL', 'REJECT']);
 });
 
 test('DPR static + two static proxies: category select references existing ⚡ Fastest', () => {
@@ -283,7 +287,7 @@ test('DPR static + two static proxies: category select references existing ⚡ F
     const cfg = buildMihomoConfig(beans, { domainPolicy: policies });
     assert.ok(cfg['proxy-groups'].some(g => g.name === '⚡ Fastest'), 'two statics: Fastest group emitted');
     const ai = cfg['proxy-groups'].find(g => g.name === 'AI');
-    assert.deepEqual(ai.proxies, ['⚡ Fastest', 'GLOBAL', 'DIRECT']);
+    assert.deepEqual(ai.proxies, ['⚡ Fastest', 'GLOBAL', 'REJECT']);
 });
 
 test('DPR subscription mode: category select keeps ⚡ Fastest (providers imply the group)', () => {

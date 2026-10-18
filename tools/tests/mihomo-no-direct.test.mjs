@@ -1,0 +1,184 @@
+// No-DIRECT egress invariant (link-generators #284 / owner decision 2026-10-18):
+// the generator never emits the token DIRECT into generated YAML. Group
+// members, rules and fallback slots terminate in REJECT; an explicit DIRECT
+// domain-policy target fails the build fail-closed (both build layers); a
+// DIRECT dialer-proxy target normalizes to an omitted field (semantically
+// identical: a WG handshake without a dialer dials directly).
+//
+// Known documented exception (bootstrap-only, consumer-blocked): subscription
+// proxy-providers keep `proxy: DIRECT` as the download transport — mihomo
+// routes provider fetches through the rule chain when the field is absent
+// (verified on v1.19.31: MATCH,GLOBAL over an empty provider-backed group ⇒
+// immediate EOF, provider never loads). The link-generators Builder blocks
+// that mode under the invariant instead of emitting such YAML.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { buildMihomoSubscriptionConfig, buildMihomoConfig, buildMihomoPriorityConfig } from '../../src/core/mihomo.js';
+import { buildMihomoYaml } from '../../src/core/yaml.js';
+import { buildFromRequest } from '../../src/build.js';
+import { buildBeansFromInput } from '../../src/main.js';
+
+const DIRECT_TOKEN = /\bDIRECT\b/;
+const UUID = '00000000-0000-4000-8000-000000000001';
+
+function directLines(yaml) {
+    return String(yaml).split('\n')
+        .map((line, i) => ({ no: i + 1, line: line.trim() }))
+        .filter(x => DIRECT_TOKEN.test(x.line));
+}
+
+function assertNoDirectYaml(yaml, label) {
+    const hits = directLines(yaml);
+    assert.deepEqual(hits, [], label + ': DIRECT token found in emitted YAML: '
+        + JSON.stringify(hits.slice(0, 3)));
+}
+
+const twoLinks = [
+    'vless://' + UUID + '@192.0.2.1:443#A',
+    'vless://' + UUID + '@192.0.2.2:443#B',
+].join('\n');
+
+function staticYaml(extraOpts, input) {
+    const res = buildFromRequest({
+        core: 'mihomo',
+        input: input === undefined ? twoLinks : input,
+        wgBeans: [],
+        options: Object.assign({ addTun: false, addSocks: true, webUI: false }, extraOpts || {}),
+    });
+    assert.equal(res.kind, 'yaml');
+    return res.data;
+}
+
+const policies = [
+    { name: 'AI', domains: 'openai.com\nchatgpt.com' },
+    { name: 'MEDIA', domains: ['youtube.com', 'googlevideo.com'] },
+];
+
+test('no-DIRECT: static build (two proxies) — lexical + structural', () => {
+    const cfg = buildMihomoConfig(buildBeansFromInput(twoLinks), { addSocks: true });
+    const globalGroup = cfg['proxy-groups'].find(g => g.name === 'GLOBAL');
+    assert.equal(globalGroup.proxies[globalGroup.proxies.length - 1], 'REJECT', 'GLOBAL terminates in REJECT');
+    assertNoDirectYaml(buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, {}), 'static/2');
+    assertNoDirectYaml(staticYaml(), 'static/2 via buildFromRequest');
+});
+
+test('no-DIRECT: static build (single proxy) — lexical + structural', () => {
+    const cfg = buildMihomoConfig([], { addSocks: true });
+    const globalGroup = cfg['proxy-groups'].find(g => g.name === 'GLOBAL');
+    assert.equal(globalGroup.proxies[globalGroup.proxies.length - 1], 'REJECT', 'empty GLOBAL stays REJECT-only');
+    assertNoDirectYaml(staticYaml({}, 'vless://' + UUID + '@192.0.2.1:443#A'), 'static/1');
+});
+
+test('no-DIRECT: per-proxy listeners — lexical', () => {
+    const cfg = buildMihomoConfig(buildBeansFromInput(twoLinks), { perProxyListeners: true });
+    for (const group of cfg['proxy-groups']) {
+        // 🌐 static-health is a hidden checker (lazy:false) over static leaves,
+        // not a routing group — it has no escape slot by design.
+        if (group.name === '🌐 static-health') continue;
+        if (Array.isArray(group.proxies)) {
+            assert.ok(!group.proxies.includes('DIRECT'), 'group ' + group.name + ' has no DIRECT member');
+            assert.equal(group.proxies[group.proxies.length - 1], 'REJECT', 'group ' + group.name + ' terminates in REJECT');
+        }
+    }
+    assertNoDirectYaml(buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, {}), 'per-proxy');
+});
+
+test('no-DIRECT: DPR SELECT cards — category selects end in REJECT, YAML lexical', () => {
+    const cfg = buildMihomoConfig(buildBeansFromInput(twoLinks), { addSocks: true, domainPolicy: policies });
+    for (const name of ['AI', 'MEDIA']) {
+        const group = cfg['proxy-groups'].find(g => g.name === name);
+        assert.equal(group.proxies[group.proxies.length - 1], 'REJECT', name + ' terminates in REJECT');
+    }
+    assertNoDirectYaml(buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, { ruleProviders: cfg['rule-providers'] }), 'DPR SELECT');
+});
+
+test('no-DIRECT: DPR fixed GLOBAL/REJECT targets — lexical', () => {
+    const cfg = buildMihomoConfig([], { domainPolicy: [
+        { name: 'Glob', domains: 'glob.example.com', target: 'GLOBAL' },
+        { name: 'Rej', domains: 'rej.example.com', target: 'REJECT' },
+    ] });
+    assertNoDirectYaml(buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, { ruleProviders: cfg['rule-providers'] }), 'DPR fixed targets');
+});
+
+test('no-DIRECT: DPR DIRECT target fails closed at engine level', () => {
+    assert.throws(
+        () => buildMihomoConfig([], { domainPolicy: [{ name: 'Track', domains: 'tracker.example.com', target: 'DIRECT' }] }),
+        /DIRECT is forbidden/,
+    );
+});
+
+test('no-DIRECT: DPR DIRECT target fails closed via the public API', () => {
+    assert.throws(
+        () => buildFromRequest({
+            core: 'mihomo',
+            input: 'vless://' + UUID + '@192.0.2.1:443#A',
+            wgBeans: [],
+            options: { addTun: false, addSocks: true, mihomoDomainPolicy: [{ name: 'Track', domains: 'tracker.example.com', target: 'DIRECT' }] },
+        }),
+        /DIRECT is forbidden/,
+    );
+});
+
+test('no-DIRECT: AUTO-WHITELIST priority config — flat fallback, lexical', () => {
+    const cfg = buildMihomoPriorityConfig(
+        { subUrls: [], beans: buildBeansFromInput('vless://' + UUID + '@192.0.2.1:443#P') },
+        { subUrls: [], beans: buildBeansFromInput('vless://' + UUID + '@192.0.2.2:443#F') },
+        {},
+    );
+    const globalGroup = cfg.groups[0];
+    assert.equal(globalGroup.type, 'fallback');
+    assert.equal(globalGroup['empty-fallback'], 'REJECT');
+    assertNoDirectYaml(buildMihomoYaml(cfg.proxies, cfg.groups, null, cfg.rules, [], {}), 'priority');
+});
+
+test('no-DIRECT: DPR priority-mode cards terminate in REJECT', () => {
+    const cfg = buildMihomoPriorityConfig(
+        { subUrls: [], beans: [] },
+        { subUrls: [], beans: [] },
+        { domainPolicy: policies },
+    );
+    for (const name of ['AI', 'MEDIA']) {
+        const group = cfg.groups.find(g => g.name === name);
+        assert.deepEqual(group.proxies, ['GLOBAL', 'REJECT'], name + ' = [GLOBAL, REJECT]');
+    }
+    assertNoDirectYaml(buildMihomoYaml(cfg.proxies, cfg.groups, null, cfg.rules, [], { ruleProviders: cfg.ruleProviders }), 'DPR priority');
+});
+
+test('no-DIRECT: dialer-proxy DIRECT (bean level) normalizes to omitted field', () => {
+    const wgBean = {
+        name: 'WG-A',
+        proto: 'wireguard',
+        host: '192.0.2.73',
+        port: 51820,
+        wireguard: {
+            privateKey: Buffer.alloc(32, 1).toString('base64'),
+            publicKey: Buffer.alloc(32, 11).toString('base64'),
+            ip: '10.66.1.2',
+            allowedIPs: ['0.0.0.0/0'],
+            dialerProxy: 'DIRECT',
+        },
+    };
+    const res = buildFromRequest({
+        core: 'mihomo',
+        input: '',
+        wgBeans: [wgBean],
+        options: { addTun: false, addSocks: true, webUI: false },
+    });
+    assert.equal(res.kind, 'yaml');
+    assert.ok(!res.data.includes('dialer-proxy'), 'no dialer-proxy stamped for a DIRECT target');
+    assertNoDirectYaml(res.data, 'wg dialer DIRECT');
+});
+
+test('no-DIRECT: dialer-proxy DIRECT (global option) normalizes to omitted field', () => {
+    const cfg = buildMihomoConfig([], { wgDialerProxy: 'DIRECT' });
+    const yaml = buildMihomoYaml(cfg.proxies, cfg['proxy-groups'], null, cfg.rules, cfg.listeners, { wgDialerProxy: 'DIRECT' });
+    assert.ok(!yaml.includes('dialer-proxy'), 'global DIRECT dialer stamps nothing');
+    // And with real wireguard proxies the same option stays a no-op.
+});
+
+test('no-DIRECT: subscription providers keep the documented bootstrap field (consumer-blocked mode)', () => {
+    const cfg = buildMihomoSubscriptionConfig(['https://subs.example.invalid/token'], [], {});
+    for (const provider of Object.values(cfg.providers)) {
+        assert.equal(provider.proxy, 'DIRECT', 'documented download-only bootstrap (see header comment)');
+    }
+});
