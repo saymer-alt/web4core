@@ -84,7 +84,7 @@ test('non-subscription and primary/fallback requests reject unsupported override
     providerOverrides: map([H1, H2, H2]),
   };
   assert.throws(() => buildFromRequest({
-    core: 'mihomo', input: URLS.join('\\n'), fallbackInput: URLS[2],
+    core: 'mihomo', input: URLS.join('\n'), fallbackInput: URLS[2],
     options,
   }), /providerOverrides/);
   assert.throws(() => buildFromRequest({
