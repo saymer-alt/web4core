@@ -1005,6 +1005,32 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
     const deviceHwid = (typeof opts?.deviceHwid === 'string' && /^[A-Za-z0-9=-]{10,64}$/.test(opts.deviceHwid.trim()))
         ? opts.deviceHwid.trim()
         : '';
+    // Advanced per-provider HWID contract (#280), opt-in and fail-closed.
+    // Keep URL alignment explicit: the caller must bind each override to its
+    // exact source URL after applying the project's stable source IDs.
+    // Never echo URL/HWID values in validation errors or logs.
+    const providerOverrides = opts?.providerOverrides;
+    if (providerOverrides !== undefined) {
+        if (!Array.isArray(providerOverrides) || providerOverrides.length !== subscriptionUrls.length) {
+            throw new Error('providerOverrides: one aligned entry per subscription is required (values hidden)');
+        }
+        if (new Set(subscriptionUrls).size !== subscriptionUrls.length) {
+            throw new Error('providerOverrides: duplicate subscription URLs need explicit disambiguation (values hidden)');
+        }
+        providerOverrides.forEach((entry, index) => {
+            if (entry === null) {
+                if (!deviceHwid) throw new Error('providerOverrides: inherited HWID is missing (values hidden)');
+                return;
+            }
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+                || Object.keys(entry).some(key => key !== 'sourceUrl' && key !== 'hwid')
+                || entry.sourceUrl !== subscriptionUrls[index]
+                || typeof entry.hwid !== 'string'
+                || !/^[A-Za-z0-9=-]{10,64}$/.test(entry.hwid)) {
+                throw new Error('providerOverrides: invalid source/identity mapping at position ' + (index + 1) + ' (values hidden)');
+            }
+        });
+    }
     subscriptionUrls.forEach((url, index) => {
         const providerName = computeProviderName(url, index, subscriptionUrls.length, usedProviderNames);
         const deviceModel = typeof opts?.deviceModel === 'string' ? opts.deviceModel.trim() : '';
@@ -1012,7 +1038,7 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
             type: 'http',
             proxy: 'DIRECT',
             header: {
-                'x-hwid': [deviceHwid || generateSecretHex32()],
+                'x-hwid': [(providerOverrides?.[index]?.hwid) || deviceHwid || generateSecretHex32()],
                 ...(deviceModel ? { 'x-device-model': [deviceModel] } : {})
             },
             url: url,

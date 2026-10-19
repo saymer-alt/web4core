@@ -191,6 +191,13 @@ export function buildFromRequest(req) {
 
   if (!core) throw new Error('Missing core');
   if (core !== 'singbox' && core !== 'xray' && core !== 'mihomo') throw new Error('Invalid core: ' + core);
+  // Never silently discard per-provider identities in another output mode.
+  // Primary/fallback currently has two independent source lists; its mapping
+  // must be designed separately rather than guessing the source order.
+  if (options.providerOverrides !== undefined &&
+      !(core === 'mihomo' && options.mihomoSubscriptionMode && req.fallbackInput === undefined)) {
+    throw new Error('providerOverrides: supported only for Mihomo Sub Mode without primary/fallback (values hidden)');
+  }
 
   if (core === 'singbox') {
     if (options.addTun === undefined) options.addTun = false;
@@ -337,7 +344,7 @@ export function buildFromRequest(req) {
     assertCoreSupports(extraBeans, core, 'Mihomo', options);
     applyRealityModernHosts(extraBeans, modernHosts);
 
-    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter, modernHosts, deviceModel: options.deviceModel, deviceHwid: options.deviceHwid, domainPolicy: options.domainPolicy});
+    const cfg = buildMihomoSubscriptionConfig(subUrls, extraBeans, {addSocks, perProxyPort, perProxyListeners, urlTest: options.urlTest, excludeFilter: options.excludeFilter, modernHosts, deviceModel: options.deviceModel, deviceHwid: options.deviceHwid, providerOverrides: options.providerOverrides, domainPolicy: options.domainPolicy});
     const yaml = buildMihomoYaml(cfg.proxies, cfg.groups, cfg.providers, cfg.rules, cfg.listeners, {
       addSocks,
       webUI,
