@@ -75,3 +75,20 @@ test('buildFromRequest forwards overrides to generated Mihomo YAML', () => {
   assert.equal((yaml.match(new RegExp(H1, 'g')) || []).length, 1);
   assert.equal((yaml.match(new RegExp(H2, 'g')) || []).length, 2);
 });
+
+test('non-subscription and primary/fallback requests reject unsupported override routing', () => {
+  const options = {
+    addSocks: true,
+    mihomoSubscriptionMode: true,
+    deviceHwid: H1,
+    providerOverrides: map([H1, H2, H2]),
+  };
+  assert.throws(() => buildFromRequest({
+    core: 'mihomo', input: URLS.join('\\n'), fallbackInput: URLS[2],
+    options,
+  }), /providerOverrides/);
+  assert.throws(() => buildFromRequest({
+    core: 'mihomo', input: 'vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443#synthetic',
+    options: { ...options, mihomoSubscriptionMode: false },
+  }), /providerOverrides/);
+});
