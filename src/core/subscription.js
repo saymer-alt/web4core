@@ -197,6 +197,7 @@ async function fetchSubscription(url, options = {}) {
     const isBrowser = (typeof window !== 'undefined') && (typeof window.document !== 'undefined');
     const allowedRequestHeaders = new Set(['x-hwid', 'x-device-model']);
     const requestHeaders = {};
+    const requireDeviceHeaders = options && options.requireDeviceHeaders === true;
     if (options && options.headers && typeof options.headers === 'object') {
         for (const [rawName, rawValue] of Object.entries(options.headers)) {
             const name = String(rawName || '').trim().toLowerCase();
@@ -204,6 +205,13 @@ async function fetchSubscription(url, options = {}) {
             const value = String(rawValue).trim();
             if (value) requestHeaders[name] = value;
         }
+    }
+
+    // Strict opt-in for portable project v2 (#280/#307): preview must never
+    // report successful subscription inspection from an anonymous fallback.
+    // Legacy behavior stays byte-identical unless the caller opts in.
+    if (requireDeviceHeaders && !requestHeaders['x-hwid']) {
+        throw new Error('Strict subscription preview requires x-hwid (value hidden)');
     }
 
     function hasRealSubscriptionLinks(text) {
@@ -382,7 +390,12 @@ async function fetchSubscription(url, options = {}) {
                         })
                     });
                 }
-                fallbackAttempts.push({ kind: 'get', attemptFor: () => ({ deviceHeaders: false }) });
+                // The old GET worker intentionally drops the HWID. It is
+                // wrong to treat a GET-success as verified provider-specific
+                // identity in portable v2 mode. Fail closed instead.
+                if (!requireDeviceHeaders) {
+                    fallbackAttempts.push({ kind: 'get', attemptFor: () => ({ deviceHeaders: false }) });
+                }
                 for (const attempt of fallbackAttempts) {
                     for (let retry = 0; retry <= maxRetries; retry++) {
                         const result = await tryFetch(makeUrl(u), attempt.attemptFor(u));
@@ -438,6 +451,10 @@ async function fetchSubscription(url, options = {}) {
     }
     return filtered.join('\n');
 }
+
+// Presence check for browser consumers: older builds silently ignore unknown
+// options, so callers must require this capability before strict fetch.
+fetchSubscription.supportsStrictDeviceHeaders = true;
 
 export {
     fetchSubscription
