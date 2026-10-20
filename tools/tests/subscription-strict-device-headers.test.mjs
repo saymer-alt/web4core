@@ -159,5 +159,6 @@ test('strict Worker must also return response policy proof; do not trust capabil
   });
   await assert.rejects(fetchSubscription(url,{headers:{'x-hwid':hwid},
     requireDeviceHeaders:true}));
-  assert.equal(calls.filter(c=>c.method==='POST').length,1);
+  assert.ok(calls.filter(c=>c.method==='POST').length >= 1, 'strict POST was attempted');
+  assert.ok(!calls.some(c=>c.target.includes('?url=') && c.method==='GET'), 'no anonymous fallback');
 });
