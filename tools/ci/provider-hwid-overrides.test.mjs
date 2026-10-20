@@ -33,6 +33,26 @@ test('null entries inherit global identity; explicit values never rotate', () =>
   assert.deepEqual(getHwids(build(URLS, { deviceHwid: H1, providerOverrides: overrides })), [H1, H2, H1]);
 });
 
+test('explicit null HWID omits device headers; stable paid-provider HWID persists', () => {
+  const options = {deviceHwid: H1, deviceModel: 'Synthetic Device',
+    providerOverrides: [{sourceUrl: URLS[0],hwid:null}, {sourceUrl: URLS[1],hwid:H2}, {sourceUrl: URLS[2],hwid:H2}]};
+  for (let repeat = 0; repeat < 3; repeat++) {
+    const out = build(URLS,options);
+    const p = Object.values(out.providers);
+    assert.equal(Object.hasOwn(p[0], 'header'), false, 'public Gist has no identity headers');
+    assert.deepEqual(p[1].header['x-hwid'],[H2]);
+    assert.deepEqual(p[2].header['x-hwid'],[H2]);
+    assert.deepEqual(p[1].header['x-device-model'],['Synthetic Device']);
+  }
+  // Bare null entry still means inherit global H1 (distinct from {hwid:null}).
+  const inherited = build(URLS,{deviceHwid:H1,providerOverrides:[null,{sourceUrl:URLS[1],hwid:H2},null]});
+  assert.deepEqual(getHwids(inherited),[H1,H2,H1]);
+  const yaml = buildFromRequest({core:'mihomo',input:URLS.join('\n'),options:{
+    addSocks:true,mihomoSubscriptionMode:true,...options
+  }}).data;
+  assert.ok(yaml.includes(H2) && !yaml.includes('x-hwid:\n    - null'));
+});
+
 test('mismatched order and counts are rejected before output', () => {
   assert.throws(() => build(URLS, { deviceHwid: H1, providerOverrides: map([H1, H2]) }), /providerOverrides/);
   const swapped = [URLS[1], URLS[0], URLS[2]];
