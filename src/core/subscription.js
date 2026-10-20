@@ -474,7 +474,7 @@ async function fetchSubscription(url, options = {}) {
     if (!body) throw new Error('Empty response');
     {
         const cand = body.split(/\n/).map(s => s.trim()).filter(Boolean);
-        if (cand.length === 1 && isHttpUrl(cand[0]) && !looksLikeLinksList(cand[0])) {
+        if (cand.length === 1 && isHttpUrl(cand[0]) && (requireDeviceHeaders || !looksLikeLinksList(cand[0]))) {
             body = await fetchWithFallback(cand[0], 1);
         }
     }
