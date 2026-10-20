@@ -13,6 +13,11 @@
 // response-size cap and http(s)-only scheme check.
 
 const ALLOWED_HEADERS = new Set(["x-hwid", "x-device-model"]);
+// Public capability proof contains NO URL or user credentials. Older deployed
+// Workers cannot pass the preflight, so portable v2 never sends HWID to them.
+const POLICY_PATH = "/.well-known/subscription-policy-v1";
+const POLICY_HEADER = "X-Saymer-Device-Header-Policy";
+const POLICY_VERSION = "strict-same-origin-v1";
 const MAX_REDIRECTS = 5;
 const UPSTREAM_TIMEOUT_MS = 15000;
 const MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
@@ -21,13 +26,15 @@ const CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Expose-Headers": POLICY_HEADER,
     "Access-Control-Max-Age": "86400"
 };
 
-function textResponse(body, status) {
+function textResponse(body, status, policyProof = false) {
     return new Response(body, {
         status,
-        headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS_HEADERS, "Cache-Control": "no-store" }
+        headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS_HEADERS,
+            "Cache-Control": "no-store", ...(policyProof ? { [POLICY_HEADER]: POLICY_VERSION } : {}) }
     });
 }
 
@@ -101,7 +108,7 @@ function isRedirect(status) {
     return status === 301 || status === 302 || status === 303 || status === 307 || status === 308;
 }
 
-async function resolveUpstream(target, forwardHeaders) {
+async function resolveUpstream(target, forwardHeaders, strictDeviceHeaders = false) {
     // Ручной redirect-chain: каждый хоп валидируется заново (http/https only,
     // относительный Location разрешается от текущего URL), лимит hops —
     // MAX_REDIRECTS, ошибки — generic, без эха полного target URL.
@@ -124,6 +131,11 @@ async function resolveUpstream(target, forwardHeaders) {
                 // Перенаправление в запрещённую схему — не fetch-им её вообще.
                 return textResponse("Redirect to a non-http(s) target rejected", 502);
             }
+            // Portable v2 rejects an origin change BEFORE issuing its
+            // second request with device headers. Non-strict legacy behavior
+            // stays intact until separately reviewed and explicitly deployed.
+            if (strictDeviceHeaders && next.origin !== new URL(current).origin)
+                return textResponse("Cross-origin redirect rejected for device identity", 502);
             current = next.toString();
             continue;
         }
@@ -134,12 +146,16 @@ async function resolveUpstream(target, forwardHeaders) {
 
 export default {
     async fetch(request) {
+        if (request.method === "GET" && new URL(request.url).pathname === POLICY_PATH) {
+            return textResponse(POLICY_VERSION, 200, true);
+        }
         if (request.method === "OPTIONS") {
             return new Response(null, { status: 204, headers: CORS_HEADERS });
         }
 
         let target = "";
         let forwardHeaders = null;
+        let strictDeviceHeaders = false;
         if (request.method === "POST") {
             let payload = null;
             try {
@@ -150,6 +166,10 @@ export default {
             if (!payload || typeof payload !== "object") return textResponse("Invalid JSON body", 400);
             target = String(payload.url || "").trim();
             forwardHeaders = collectForwardHeaders(payload.headers);
+            strictDeviceHeaders = payload.strictDeviceHeaders === true;
+            if (strictDeviceHeaders && !forwardHeaders["x-hwid"]) {
+                return textResponse("Strict subscription requires a valid HWID", 400);
+            }
         } else if (request.method === "GET") {
             const url = new URL(request.url);
             target = (url.searchParams.get("url") || "").trim();
@@ -170,7 +190,7 @@ export default {
 
         let response;
         try {
-            response = await resolveUpstream(parsed.toString(), forwardHeaders);
+            response = await resolveUpstream(parsed.toString(), forwardHeaders, strictDeviceHeaders);
         } catch (_) {
             return textResponse("Upstream fetch failed", 502);
         }
@@ -180,7 +200,8 @@ export default {
             headers: {
                 "Content-Type": "text/plain; charset=utf-8",
                 ...CORS_HEADERS,
-                "Cache-Control": "no-store"
+                "Cache-Control": "no-store",
+                ...(strictDeviceHeaders ? { [POLICY_HEADER]: POLICY_VERSION } : {})
             }
         });
     }

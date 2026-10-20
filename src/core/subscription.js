@@ -197,6 +197,11 @@ async function fetchSubscription(url, options = {}) {
     const isBrowser = (typeof window !== 'undefined') && (typeof window.document !== 'undefined');
     const allowedRequestHeaders = new Set(['x-hwid', 'x-device-model']);
     const requestHeaders = {};
+    const requireDeviceHeaders = options && options.requireDeviceHeaders === true;
+    const policyPath = '/.well-known/subscription-policy-v1';
+    const policyHeader = 'X-Saymer-Device-Header-Policy';
+    const policyVersion = 'strict-same-origin-v1';
+    const originalOrigin = requireDeviceHeaders ? new URL(url).origin : '';
     if (options && options.headers && typeof options.headers === 'object') {
         for (const [rawName, rawValue] of Object.entries(options.headers)) {
             const name = String(rawName || '').trim().toLowerCase();
@@ -204,6 +209,32 @@ async function fetchSubscription(url, options = {}) {
             const value = String(rawValue).trim();
             if (value) requestHeaders[name] = value;
         }
+    }
+
+    // Strict opt-in for portable project v2 (#280/#307): preview must never
+    // report successful subscription inspection from an anonymous fallback.
+    // Legacy behavior stays byte-identical unless the caller opts in.
+    if (requireDeviceHeaders && !requestHeaders['x-hwid']) {
+        throw new Error('Strict subscription preview requires x-hwid (value hidden)');
+    }
+
+    // The browser GET capability probe sends NO subscription URL/HWID.
+    // Without positive proof from the Worker that enforces same-origin
+    // device-header redirects, an older deployed Worker never receives HWID.
+    async function hasStrictWorkerPolicy(makeUrl, target) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), SUB_FETCH_TIMEOUT);
+        try {
+            const origin = new URL(makeUrl(target)).origin;
+            const response = await fetch(origin + policyPath, {
+                method: 'GET', redirect: 'error', credentials: 'omit',
+                cache: 'no-store', headers: {'Accept': 'text/plain'},
+                signal: controller.signal
+            });
+            return response.ok && response.status === 200
+                && response.headers.get(policyHeader) === policyVersion;
+        } catch (_) { return false; }
+        finally { clearTimeout(timeoutId); }
     }
 
     function hasRealSubscriptionLinks(text) {
@@ -239,10 +270,20 @@ async function fetchSubscription(url, options = {}) {
             }
 
             const init = Object.assign({}, FETCH_INIT, { headers, signal: controller.signal });
+            if (requireDeviceHeaders) {
+                // With custom x-hwid, native browser redirect:follow could
+                // forward it to an arbitrary second origin without JS consent.
+                // manual gives opaqueredirect in browsers => fail closed / Worker.
+                init.redirect = 'manual';
+            }
             // POST JSON контракт подменяет method/headers/body целиком —
             // identity в этом случае уезжает в JSON body, не в заголовки.
             if (attempt && attempt.init) Object.assign(init, attempt.init);
             const resp = await fetch(u, init);
+            if (requireDeviceHeaders && attempt?.requirePolicyProof &&
+                resp.headers.get(policyHeader) !== policyVersion) {
+                return {error: new Error('Strict Worker policy proof unavailable')};
+            }
             if (!resp.ok) {
                 const reason = resp.statusText || httpReason(resp.status) || '';
                 const label = 'HTTP ' + resp.status + (reason ? (' ' + reason) : '');
@@ -281,6 +322,17 @@ async function fetchSubscription(url, options = {}) {
 
     async function fetchWithFallback(u, depth) {
         if (depth > MAX_SUB_REDIRECTS) throw new Error('Too many redirects');
+        // Includes meta-refresh and a single next-subscription URL found in
+        // HTML/text. Never carry the device identity to another origin.
+        if (requireDeviceHeaders) {
+            let current;
+            try { current = new URL(u); } catch (_) {
+                throw new Error('Strict subscription source URL invalid');
+            }
+            if ((current.protocol !== 'https:' && current.protocol !== 'http:') ||
+                current.origin !== originalOrigin)
+                throw new Error('Strict subscription origin changed');
+        }
 
         const handleResponse = async (text) => {
             if (!text || typeof text !== 'string') return null;
@@ -360,6 +412,10 @@ async function fetchSubscription(url, options = {}) {
             }
 
             for (const makeUrl of PUBLIC_CORS_FALLBACKS) {
+                if (requireDeviceHeaders && !(await hasStrictWorkerPolicy(makeUrl, u))) {
+                    lastFallbackError = new Error('Strict Worker origin policy unavailable');
+                    continue;
+                }
                 const maxRetries = Math.max(0, Number(SUB_FALLBACK_RETRIES || 0));
                 // Device identity survives the CORS fallback: when allowlisted
                 // headers are requested, they are sent in a POST JSON body
@@ -377,12 +433,19 @@ async function fetchSubscription(url, options = {}) {
                             init: {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ url: target, headers: requestHeaders })
-                            }
+                                body: JSON.stringify({ url: target, headers: requestHeaders,
+                                    ...(requireDeviceHeaders ? {strictDeviceHeaders: true} : {}) })
+                            },
+                            ...(requireDeviceHeaders ? {requirePolicyProof: true} : {})
                         })
                     });
                 }
-                fallbackAttempts.push({ kind: 'get', attemptFor: () => ({ deviceHeaders: false }) });
+                // The old GET worker intentionally drops the HWID. It is
+                // wrong to treat a GET-success as verified provider-specific
+                // identity in portable v2 mode. Fail closed instead.
+                if (!requireDeviceHeaders) {
+                    fallbackAttempts.push({ kind: 'get', attemptFor: () => ({ deviceHeaders: false }) });
+                }
                 for (const attempt of fallbackAttempts) {
                     for (let retry = 0; retry <= maxRetries; retry++) {
                         const result = await tryFetch(makeUrl(u), attempt.attemptFor(u));
@@ -411,7 +474,7 @@ async function fetchSubscription(url, options = {}) {
     if (!body) throw new Error('Empty response');
     {
         const cand = body.split(/\n/).map(s => s.trim()).filter(Boolean);
-        if (cand.length === 1 && isHttpUrl(cand[0]) && !looksLikeLinksList(cand[0])) {
+        if (cand.length === 1 && isHttpUrl(cand[0]) && (requireDeviceHeaders || !looksLikeLinksList(cand[0]))) {
             body = await fetchWithFallback(cand[0], 1);
         }
     }
@@ -438,6 +501,11 @@ async function fetchSubscription(url, options = {}) {
     }
     return filtered.join('\n');
 }
+
+// Presence check for browser consumers: older builds silently ignore unknown
+// options, so callers must require this capability before strict fetch.
+fetchSubscription.supportsStrictDeviceHeaders = true;
+fetchSubscription.supportsStrictOriginPolicy = true;
 
 export {
     fetchSubscription
