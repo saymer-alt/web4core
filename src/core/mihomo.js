@@ -1025,8 +1025,8 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
             if (!entry || typeof entry !== 'object' || Array.isArray(entry)
                 || Object.keys(entry).some(key => key !== 'sourceUrl' && key !== 'hwid')
                 || entry.sourceUrl !== subscriptionUrls[index]
-                || typeof entry.hwid !== 'string'
-                || !/^[A-Za-z0-9=-]{10,64}$/.test(entry.hwid)) {
+                || (entry.hwid !== null && (typeof entry.hwid !== 'string'
+                    || !/^[A-Za-z0-9=-]{10,64}$/.test(entry.hwid)))) {
                 throw new Error('providerOverrides: invalid source/identity mapping at position ' + (index + 1) + ' (values hidden)');
             }
         });
@@ -1034,13 +1034,19 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
     subscriptionUrls.forEach((url, index) => {
         const providerName = computeProviderName(url, index, subscriptionUrls.length, usedProviderNames);
         const deviceModel = typeof opts?.deviceModel === 'string' ? opts.deviceModel.trim() : '';
+        // An explicit {sourceUrl, hwid:null} means the subscription does NOT
+        // require device identity (e.g. a user's public/private Gist).
+        // Only this exact opt-out suppresses both identity headers; bare null
+        // providerOverrides items still inherit the stable global HWID.
+        const omitDeviceIdentity = providerOverrides?.[index] !== null
+            && providerOverrides?.[index]?.hwid === null;
         providers[providerName] = {
             type: 'http',
             proxy: 'DIRECT',
-            header: {
+            ...(!omitDeviceIdentity ? {header: {
                 'x-hwid': [(providerOverrides?.[index]?.hwid) || deviceHwid || generateSecretHex32()],
                 ...(deviceModel ? { 'x-device-model': [deviceModel] } : {})
-            },
+            }} : {}),
             url: url,
             interval: SUB_REFRESH_INTERVAL,
             __comments: {
