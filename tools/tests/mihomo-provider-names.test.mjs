@@ -56,7 +56,7 @@ test('invalid or misplaced directives fail closed', () => {
   for (const input of [
     '# provider-name: \n' + one,
     '# provider-name: A\n# provider-name: B\n' + one,
-    '# provider-name: A',
+    '# provider-name: A\nsocks://user:pass@proxy.example.invalid:1080',
     '# provider-name: A\nvless://x@y',
     '# provider-name: A\nhttps://user:secret@one.example.invalid/sub'
   ]) {
