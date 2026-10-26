@@ -53,7 +53,19 @@ function sanitizeProviderName(name) {
     return cleaned.slice(0, 48);
 }
 
-function computeProviderName(url, index, total, used) {
+function computeProviderName(url, index, total, used, customName = null) {
+    if (customName !== null && customName !== undefined) {
+        const name = String(customName).trim();
+        // Names become YAML keys and referenced provider IDs. Preserve the
+        // user's readable label but reject controls/injection and object keys.
+        if (!/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,47}$/u.test(name) ||
+            ['__proto__', 'constructor', 'prototype'].includes(name.toLowerCase())) {
+            throw new Error('Invalid provider-name: use 1-48 letters, digits, spaces, dot, underscore or hyphen');
+        }
+        if (used.has(name)) throw new Error('Duplicate provider-name: ' + name);
+        used.add(name);
+        return name;
+    }
     let base = '';
     try {
         const u = new URL(String(url || '').trim());
@@ -1006,7 +1018,7 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
         ? opts.deviceHwid.trim()
         : '';
     subscriptionUrls.forEach((url, index) => {
-        const providerName = computeProviderName(url, index, subscriptionUrls.length, usedProviderNames);
+        const providerName = computeProviderName(url, index, subscriptionUrls.length, usedProviderNames, Array.isArray(opts?.providerNames) ? opts.providerNames[index] : null);
         const deviceModel = typeof opts?.deviceModel === 'string' ? opts.deviceModel.trim() : '';
         providers[providerName] = {
             type: 'http',
@@ -1217,7 +1229,7 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
     const probe = { url: getUrlTest(opts), interval: PROXY_FETCH_INTERVAL, lazy: false };
     for (const [name, side] of [['PRIMARY', primary], ['FALLBACK', fallback]]) {
         const built = side.subUrls.length
-            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts, deviceModel: opts?.deviceModel, deviceHwid: opts?.deviceHwid })
+            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts, deviceModel: opts?.deviceModel, deviceHwid: opts?.deviceHwid, providerNames: side.providerNames })
             : buildMihomoConfig(side.beans, { urlTest: opts?.urlTest });
         const names = [];
         const renameMap = new Map();
