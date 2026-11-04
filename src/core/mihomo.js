@@ -53,7 +53,19 @@ function sanitizeProviderName(name) {
     return cleaned.slice(0, 48);
 }
 
-function computeProviderName(url, index, total, used) {
+function computeProviderName(url, index, total, used, customName = null) {
+    if (customName !== null && customName !== undefined) {
+        const name = String(customName).trim();
+        // Names become YAML keys and referenced provider IDs. Preserve the
+        // user's readable label but reject controls/injection and object keys.
+        if (!/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,47}$/u.test(name) ||
+            ['__proto__', 'constructor', 'prototype'].includes(name.toLowerCase())) {
+            throw new Error('Invalid provider-name: use 1-48 letters, digits, spaces, dot, underscore or hyphen');
+        }
+        if (used.has(name)) throw new Error('Duplicate provider-name: ' + name);
+        used.add(name);
+        return name;
+    }
     let base = '';
     try {
         const u = new URL(String(url || '').trim());
@@ -1016,9 +1028,41 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
     const deviceHwid = (typeof opts?.deviceHwid === 'string' && /^[A-Za-z0-9=-]{10,64}$/.test(opts.deviceHwid.trim()))
         ? opts.deviceHwid.trim()
         : '';
+    // Advanced per-provider HWID contract (#280), opt-in and fail-closed.
+    // Keep URL alignment explicit: the caller must bind each override to its
+    // exact source URL after applying the project's stable source IDs.
+    // Never echo URL/HWID values in validation errors or logs.
+    const providerOverrides = opts?.providerOverrides;
+    if (providerOverrides !== undefined) {
+        if (!Array.isArray(providerOverrides) || providerOverrides.length !== subscriptionUrls.length) {
+            throw new Error('providerOverrides: one aligned entry per subscription is required (values hidden)');
+        }
+        if (new Set(subscriptionUrls).size !== subscriptionUrls.length) {
+            throw new Error('providerOverrides: duplicate subscription URLs need explicit disambiguation (values hidden)');
+        }
+        providerOverrides.forEach((entry, index) => {
+            if (entry === null) {
+                if (!deviceHwid) throw new Error('providerOverrides: inherited HWID is missing (values hidden)');
+                return;
+            }
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+                || Object.keys(entry).some(key => key !== 'sourceUrl' && key !== 'hwid')
+                || entry.sourceUrl !== subscriptionUrls[index]
+                || (entry.hwid !== null && (typeof entry.hwid !== 'string'
+                    || !/^[A-Za-z0-9=-]{10,64}$/.test(entry.hwid)))) {
+                throw new Error('providerOverrides: invalid source/identity mapping at position ' + (index + 1) + ' (values hidden)');
+            }
+        });
+    }
     subscriptionUrls.forEach((url, index) => {
-        const providerName = computeProviderName(url, index, subscriptionUrls.length, usedProviderNames);
+        const providerName = computeProviderName(url, index, subscriptionUrls.length, usedProviderNames, Array.isArray(opts?.providerNames) ? opts.providerNames[index] : null);
         const deviceModel = typeof opts?.deviceModel === 'string' ? opts.deviceModel.trim() : '';
+        // An explicit {sourceUrl, hwid:null} means the subscription does NOT
+        // require device identity (e.g. a user's public/private Gist).
+        // Only this exact opt-out suppresses both identity headers; bare null
+        // providerOverrides items still inherit the stable global HWID.
+        const omitDeviceIdentity = providerOverrides?.[index] !== null
+            && providerOverrides?.[index]?.hwid === null;
         providers[providerName] = {
             type: 'http',
             // Service/transport plane (no-DIRECT #284 revised): the explicit
@@ -1029,10 +1073,10 @@ function buildMihomoSubscriptionConfig(subscriptionUrls, extraBeans, opts) {
             // normally). Download-only: never referenced by user-traffic
             // groups or rules.
             proxy: 'DIRECT',
-            header: {
-                'x-hwid': [deviceHwid || generateSecretHex32()],
+            ...(!omitDeviceIdentity ? {header: {
+                'x-hwid': [(providerOverrides?.[index]?.hwid) || deviceHwid || generateSecretHex32()],
                 ...(deviceModel ? { 'x-device-model': [deviceModel] } : {})
-            },
+            }} : {}),
             url: url,
             interval: SUB_REFRESH_INTERVAL,
             __comments: {
@@ -1235,7 +1279,7 @@ function buildMihomoPriorityConfig(primary, fallback, opts) {
     const probe = { url: getUrlTest(opts), interval: PROXY_FETCH_INTERVAL, lazy: false };
     for (const [name, side] of [['PRIMARY', primary], ['FALLBACK', fallback]]) {
         const built = side.subUrls.length
-            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts, deviceModel: opts?.deviceModel, deviceHwid: opts?.deviceHwid })
+            ? buildMihomoSubscriptionConfig(side.subUrls, side.beans, { urlTest: opts?.urlTest, excludeFilter: opts?.excludeFilter, modernHosts: opts?.modernHosts, deviceModel: opts?.deviceModel, deviceHwid: opts?.deviceHwid, providerNames: side.providerNames })
             : buildMihomoConfig(side.beans, { urlTest: opts?.urlTest });
         const names = [];
         const renameMap = new Map();
