@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KAS Mini Mihomo Generator (Phase 0)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.45 system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 12px; }
+  h1 { font-size: 18px; } h2 { font-size: 15px; margin: 18px 0 6px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 110px; font-family: ui-monospace, monospace; }
+  textarea#preview { min-height: 260px; }
+  label.opt { display: inline-flex; gap: 6px; align-items: center; margin: 4px 14px 4px 0; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 10px 0; }
+  button { padding: 6px 14px; margin: 6px 6px 0 0; }
+  #report, #yamlout { margin-top: 10px; }
+  .err { color: #c0392b; } .warn { color: #b8860b; } .note { color: #666; font-size: 12px; }
+  .hidden { display: none; }
+  #subwrap.off { opacity: .5; }
+</style>
+</head>
+<body>
+<h1>KAS Mini Mihomo Generator</h1>
+<p class="note">Эксперимент Phase 0 (issue #425): только локальная генерация нового полного <code>config.yaml</code>.
+Импорт через существующий импортёр KAS Web (проверка/backup/rollback) выполняется отдельным явным действием.
+Ниже нет сетевых запросов и хранения данных: всё живёт в памяти вкладки до закрытия.</p>
+
+<h2>Входные данные</h2>
+<label>Ссылки на серверы (по одной в строке: <code>vless://</code>, <code>hysteria2://</code>, <code>trojan://</code>, …)</label>
+<textarea id="links" placeholder="vless://…&#10;hysteria2://…&#10;trojan://…" spellcheck="false"></textarea>
+
+<label class="opt"><input type="checkbox" id="subsToggle"> 📡 Использовать URL-подписки (нативные proxy-providers, загрузит сам Mihomo после импорта)</label>
+<div id="subwrap" class="off">
+  <label>URL-подписки (http(s), по одной в строке)</label>
+  <textarea id="subUrls" placeholder="https://example.com/sub" spellcheck="false"></textarea>
+</div>
+
+<label class="opt"><button type="button" id="wgBtn">📂 Добавить WireGuard / AmneziaWG (.conf, .wg, .awg)</button>
+<span id="wgCount" class="note"></span></label>
+<input type="file" id="wgFiles" multiple accept=".conf,.wg,.awg" class="hidden">
+<div id="wgList" class="note"></div>
+
+<h2>Настройки</h2>
+<fieldset>
+  <label class="opt"><input type="checkbox" id="allowLan" checked> 🌐 Allow LAN (0.0.0.0)</label>
+  <label class="opt"><input type="checkbox" id="mixedOn" checked> 🔌 Mixed Port</label>
+  <input type="number" id="mixedPort" min="1" max="65535" value="7890" style="width:90px">
+  <label class="opt"><input type="checkbox" id="webUI" checked> 🖥️ Web UI (MetaCubeXD, secret обязателен)</label>
+  <label class="opt"><input type="checkbox" id="tun" checked> 🛡️ TUN Interface</label>
+  <label class="opt"><input type="checkbox" id="mips" checked> ⚡ MIPS stack для TUN</label>
+</fieldset>
+<p class="note" id="mipsNote">⚡ MIPS stack требует Mihomo ≥ 1.19.31. MIPS — это имя TUN-стека Mihomo, а не архитектура CPU роутера.
+Fallback gvisor — только явным отключением этого переключателя.</p>
+<p class="note">🌐 bind-address «*» — все интерфейсы роутера; доступ извне ограничивается firewall (не меняется автоматически).
+🖥️ Web UI эмитит <code>external-controller: 0.0.0.0:9090</code> со сгенерированным secret (без него API недоступен).</p>
+
+<button type="button" id="gen">Создать YAML</button>
+<button type="button" id="dl" disabled>Скачать YAML</button>
+
+<div id="report"></div>
+<h2>Предпросмотр (read-only)</h2>
+<textarea id="preview" readonly spellcheck="false"></textarea>
+
+<script type="module">
+import { buildMiniMihomoConfig } from './kas-mini.js';
+
+const $ = id => document.getElementById(id);
+const files = []; // {name, text} — только в памяти вкладки
+
+$('wgBtn').addEventListener('click', () => $('wgFiles').click());
+$('wgFiles').addEventListener('change', async (ev) => {
+  for (const f of ev.target.files) files.push({ name: f.name, text: await f.text() });
+  ev.target.value = '';
+  renderWg();
+});
+function renderWg() {
+  $('wgCount').textContent = files.length ? `файлов: ${files.length}` : '';
+  $('wgList').textContent = files.map(f => f.name).join(', ');
+}
+$('subsToggle').addEventListener('change', () => {
+  $('subwrap').classList.toggle('off', !$('subsToggle').checked);
+});
+$('tun').addEventListener('change', () => {
+  const on = $('tun').checked;
+  $('mips').disabled = !on;
+  $('mipsNote').classList.toggle('hidden', !on);
+});
+
+let lastYaml = '';
+$('gen').addEventListener('click', () => {
+  $('report').innerHTML = '';
+  try {
+    const r = buildMiniMihomoConfig({
+      linksText: $('links').value,
+      subscriptionUrlsText: $('subUrls').value,
+      subscriptions: $('subsToggle').checked,
+      wgFiles: files,
+      allowLan: $('allowLan').checked,
+      mixedPort: $('mixedPort').value === '' ? 7890 : Number($('mixedPort').value),
+      webUI: $('webUI').checked,
+      tun: $('tun').checked,
+      mipsStack: $('mips').checked,
+    });
+    lastYaml = r.yaml;
+    $('preview').value = r.yaml;
+    $('dl').disabled = false;
+    const rep = r.report;
+    const parts = [];
+    parts.push(`✅ узлов: ${rep.nodes}, провайдеров: ${rep.subscriptions.providers.length || 0}`);
+    if (rep.links.accepted) parts.push(`ссылок принято: ${rep.links.accepted}`);
+    if (rep.links.rejected) parts.push(`<span class="err">строк отклонено: ${rep.links.rejected}</span>`);
+    if (rep.wg.accepted) parts.push(`WG/AWG принято: ${rep.wg.accepted}`);
+    if (rep.wg.refused) parts.push(`<span class="err">WG/AWG отклонено: ${rep.wg.refused}</span>`);
+    $('report').innerHTML = '<p>' + parts.join(' · ') + '</p>';
+    const ul = [];
+    for (const e of rep.links.errors) ul.push(`<li class="err">${escapeHtml(e.line)} — ${escapeHtml(e.message)}</li>`);
+    for (const f of rep.wg.files) {
+      if (f.status !== 'accepted') ul.push(`<li class="err">${escapeHtml(f.name)}: ${escapeHtml(f.error.message)}</li>`);
+      else for (const w of (f.warnings || [])) ul.push(`<li class="warn">${escapeHtml(f.name)}: ${escapeHtml(w.key)} — ${escapeHtml(w.detail)}</li>`);
+    }
+    for (const w of rep.warnings) ul.push(`<li class="warn">${escapeHtml(w)}</li>`);
+    for (const n of rep.notes) ul.push(`<li class="note">${escapeHtml(n)}</li>`);
+    if (rep.settings.webUI.enabled) ul.push('<li>secret контроллера сгенерирован и включён в YAML (строка <code>secret:</code> в предпросмотре)</li>');
+    $('report').insertAdjacentHTML('beforeend', '<ul>' + ul.join('') + '</ul>');
+  } catch (e) {
+    $('preview').value = '';
+    $('dl').disabled = true;
+    $('report').innerHTML = `<p class="err">❌ ${escapeHtml(String(e && e.message || e))}</p>`;
+  }
+});
+$('dl').addEventListener('click', () => {
+  if (!lastYaml) return;
+  const blob = new Blob([lastYaml], { type: 'text/yaml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'config.yaml';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+</script>
+</body>
+</html>
