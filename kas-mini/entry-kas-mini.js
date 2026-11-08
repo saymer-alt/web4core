@@ -439,12 +439,24 @@ function createMiniUiState() {
     };
 }
 
+// WG/AWG file reads (owner round-3 review #5817777839): File.text() is asynchronous, so the
+// DOM change handler must not push entries file-by-file — a mid-loop failure would leave a
+// partial selection masquerading as success. This all-or-nothing reader awaits every read
+// (Promise.all preserves SOURCE order, not resolution order) and rejects with the first
+// error only when nothing has been handed to the caller. Pure input → promise, no DOM:
+// negative regressions use fake files with delayed/rejecting text().
+async function readWgFileEntries(fileList) {
+    const picked = Array.from(fileList || []);
+    return Promise.all(picked.map(async (f) => ({ name: String(f.name || ''), text: String(await f.text()) })));
+}
+
 export {
     buildMiniMihomoConfig,
     applyMiniSettings,
     vetWireGuardConf,
     redactLine,
     createMiniUiState,
+    readWgFileEntries,
     MINI_NOTES,
     AWG_KEYS,
     WG_REFUSED,

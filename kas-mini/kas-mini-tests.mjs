@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { buildMiniMihomoConfig, vetWireGuardConf, redactLine, createMiniUiState } from './entry-kas-mini.js';
+import { buildMiniMihomoConfig, vetWireGuardConf, redactLine, createMiniUiState, readWgFileEntries } from './entry-kas-mini.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -472,14 +472,64 @@ test('index.html wires invalidateGeneratedYaml to every YAML-affecting input (st
     // two centralized wiring lines: textareas/number port (input) and toggles (change)
     assert.match(html, /for \(const id of \['links', 'subUrls', 'mixedPort'\]\) \$\(id\)\.addEventListener\('input', invalidateGeneratedYaml\);/);
     assert.match(html, /for \(const id of \['subsToggle', 'allowLan', 'mixedOn', 'webUI', 'tun', 'mips'\]\) \$\(id\)\.addEventListener\('change', invalidateGeneratedYaml\);/);
-    // WG file selection invalidates too
-    assert.match(html, /renderWg\(\);\s*\n\s*invalidateGeneratedYaml\(\);/);
+    // WG file selection invalidates SYNCHRONOUSLY at handler start, before the first await
+    // (owner round-3 review #5817777839: async File.text() must not leave old YAML downloadable)
+    assert.match(html, /\$\('wgFiles'\)\.addEventListener\('change', async \(ev\) => \{\s*\n\s*if \(readingWg\) \{[\s\S]*?invalidateGeneratedYaml\(\); \/\/ синхронно, ДО первого await/);
+    // reads go through the all-or-nothing reader; Generate is blocked while reading and restored in finally
+    assert.match(html, /const entries = await readWgFileEntries\(picked\);/);
+    assert.match(html, /\$\('gen'\)\.disabled = true; \/\/ генерация по неполным входным данным запрещена/);
+    assert.match(html, /finally \{\s*\n\s*readingWg = false;\s*\n\s*\$\('gen'\)\.disabled = false;\s*\n\s*\}/);
+    // Generate click refuses to run while a read is pending
+    assert.match(html, /if \(readingWg\) return; \/\/ защита от гонки/);
+    // failed read shows a visible error, no silent partial success
+    assert.match(html, /Не удалось прочитать WG\/AWG-файл/);
+    // WG file list re-render happens after successful read
+    assert.match(html, /files\.push\(\.\.\.entries\);\s*\n\s*renderWg\(\);/);
     // generation success/error and download guard go through the central state machine
     assert.match(html, /ui\.onGenerated\(r\.yaml\);/);
     assert.match(html, /ui\.onGenerateError\(\);/);
     assert.match(html, /if \(!ui\.canDownload\(\)\) return;/);
     // no legacy unsynchronized yaml cache remains
     assert.ok(!html.includes('lastYaml'), 'lastYaml cache must be gone');
+});
+
+// ---------- 12. WG file reads: async race negatives (owner round-3 review #5817777839) ----------
+test('readWgFileEntries: delayed text() — all entries returned in SOURCE order, not resolution order', async () => {
+    const deferred = [];
+    const makeFile = (name, when) => ({ name, text: () => new Promise((res, rej) => deferred.push({ res, rej, when })) });
+    const p = readWgFileEntries([makeFile('a.conf', 'later'), makeFile('b.wg', 'sooner')]);
+    assert.equal(deferred.length, 2);
+    // resolve in reverse order: b first while a is still pending — result must still be [a, b]
+    deferred.find(d => d.when === 'sooner').res('text-b');
+    await new Promise(r => setTimeout(r, 0));
+    deferred.find(d => d.when === 'later').res('text-a');
+    const entries = await p;
+    assert.deepEqual(entries.map(e => e.name), ['a.conf', 'b.wg']);
+    assert.deepEqual(entries.map(e => e.text), ['text-a', 'text-b']);
+});
+
+test('readWgFileEntries: rejected text() propagates — all-or-nothing, no partial result handed out', async () => {
+    const boom = new Error('disk read failed');
+    const files = [
+        { name: 'ok.conf', text: async () => 'good' },
+        { name: 'bad.wg', text: () => Promise.reject(boom) },
+        { name: 'third.awg', text: async () => 'never reached' },
+    ];
+    await assert.rejects(readWgFileEntries(files), (e) => e === boom);
+    // late failure after an earlier resolve still fails the whole batch — nothing partial escapes
+    const deferred = [];
+    const p = readWgFileEntries([
+        { name: 'a.conf', text: () => new Promise((res) => deferred.push({ res })) },
+        { name: 'b.wg', text: () => new Promise((_res, rej) => deferred.push({ rej })) },
+    ]);
+    deferred[0].res('text-a'); // first succeeds…
+    deferred[1].rej(new Error('quota exceeded')); // …second fails → whole batch rejected
+    await assert.rejects(p, /quota exceeded/);
+});
+
+test('readWgFileEntries: empty/absent selection resolves to [] (no entries, no throw)', async () => {
+    assert.deepEqual(await readWgFileEntries([]), []);
+    assert.deepEqual(await readWgFileEntries(null), []);
 });
 
 test('bundle: exactly 2 files, minified+gzip measured, no CORS fallback / no fetch code / no storage', () => {

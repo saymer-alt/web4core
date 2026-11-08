@@ -55,7 +55,8 @@ Fallback gvisor — только явным отключением этого п
 <p class="note">🌐 bind-address «*» — все интерфейсы роутера; доступ извне ограничивается firewall (не меняется автоматически).
 🖥️ Web UI эмитит <code>external-controller: 0.0.0.0:9090</code> со сгенерированным secret (без него API недоступен).
 🔌 Mixed Port — комбинированный HTTP+SOCKS5 слушатель; при выключении переключателя слушателя в YAML нет; порт 9090 при включённом Web UI отклоняется (конфликт слушателей).
-♻️ После изменения любых входных данных (ссылки, подписки, настройки, WG-файлы) созданный YAML удаляется, скачивание блокируется до следующего «Создать YAML» — устаревший конфиг скачать нельзя.</p>
+♻️ После изменения любых входных данных (ссылки, подписки, настройки, WG-файлы) созданный YAML удаляется, скачивание блокируется до следующего «Создать YAML» — устаревший конфиг скачать нельзя.
+Выбор WG/AWG-файлов инвалидирует результат немедленно (до завершения чтения), на время чтения «Создать YAML» заблокирована; файлы добавляются только при успешном чтении всех выбранных.</p>
 
 <button type="button" id="gen">Создать YAML</button>
 <button type="button" id="dl" disabled>Скачать YAML</button>
@@ -65,7 +66,7 @@ Fallback gvisor — только явным отключением этого п
 <textarea id="preview" readonly spellcheck="false"></textarea>
 
 <script type="module">
-import { buildMiniMihomoConfig, createMiniUiState } from './kas-mini.js';
+import { buildMiniMihomoConfig, createMiniUiState, readWgFileEntries } from './kas-mini.js';
 
 const $ = id => document.getElementById(id);
 const files = []; // {name, text} — только в памяти вкладки
@@ -88,11 +89,32 @@ for (const id of ['links', 'subUrls', 'mixedPort']) $(id).addEventListener('inpu
 for (const id of ['subsToggle', 'allowLan', 'mixedOn', 'webUI', 'tun', 'mips']) $(id).addEventListener('change', invalidateGeneratedYaml);
 
 $('wgBtn').addEventListener('click', () => $('wgFiles').click());
+let readingWg = false; // выбранные файлы ещё читаются → Generate заблокирован (round-3 review #5817777839)
 $('wgFiles').addEventListener('change', async (ev) => {
-  for (const f of ev.target.files) files.push({ name: f.name, text: await f.text() });
+  if (readingWg) { // повторный выбор во время чтения отклоняется целиком, без перемешивания
+    ev.target.value = '';
+    $('report').innerHTML = '<p class="warn">⏳ Предыдущее чтение WG/AWG-файлов ещё идёт — выберите файлы после его завершения.</p>';
+    return;
+  }
+  invalidateGeneratedYaml(); // синхронно, ДО первого await — старый YAML исчезает сразу при выборе файлов
+  const picked = Array.from(ev.target.files || []);
   ev.target.value = '';
-  renderWg();
-  invalidateGeneratedYaml();
+  if (!picked.length) { renderWg(); return; }
+  readingWg = true;
+  $('gen').disabled = true; // генерация по неполным входным данным запрещена, пока файлы не прочитаны
+  $('report').innerHTML = '<p class="note">⏳ Чтение выбранных WG/AWG-файлов…</p>';
+  try {
+    const entries = await readWgFileEntries(picked); // all-or-nothing: частичного «успеха» нет
+    files.push(...entries);
+    renderWg();
+    $('report').innerHTML = `<p class="warn">${STALE_NOTE}</p><p class="note">📂 Файлы прочитаны (всего: ${files.length}) — нажмите «Создать YAML».</p>`;
+  } catch (e) {
+    renderWg(); // files не изменился — упавшие файлы не добавлены
+    $('report').innerHTML = `<p class="err">❌ Не удалось прочитать WG/AWG-файл: ${escapeHtml(String(e && e.message || e))}. Файлы не добавлены — выберите их заново.</p><p class="warn">${STALE_NOTE}</p>`;
+  } finally {
+    readingWg = false;
+    $('gen').disabled = false;
+  }
 });
 function renderWg() {
   $('wgCount').textContent = files.length ? `файлов: ${files.length}` : '';
@@ -111,6 +133,7 @@ $('mixedOn').addEventListener('change', () => {
 });
 
 $('gen').addEventListener('click', () => {
+  if (readingWg) return; // защита от гонки: файлы ещё читаются — входные данные неполны
   $('report').innerHTML = '';
   try {
     const r = buildMiniMihomoConfig({
