@@ -39,6 +39,7 @@
 <span id="wgCount" class="note"></span></label>
 <input type="file" id="wgFiles" multiple accept=".conf,.wg,.awg" class="hidden">
 <div id="wgList" class="note"></div>
+<div class="note">⚠️ Экспериментально, ограниченная поддержка: conf с <code>DNS =</code> или неизвестными полями отклоняется целиком (без молчаливой потери параметров). Полная поддержка WG DNS — отдельное решение после Phase 0.</div>
 
 <h2>Настройки</h2>
 <fieldset>
@@ -52,7 +53,8 @@
 <p class="note" id="mipsNote">⚡ MIPS stack требует Mihomo ≥ 1.19.31. MIPS — это имя TUN-стека Mihomo, а не архитектура CPU роутера.
 Fallback gvisor — только явным отключением этого переключателя.</p>
 <p class="note">🌐 bind-address «*» — все интерфейсы роутера; доступ извне ограничивается firewall (не меняется автоматически).
-🖥️ Web UI эмитит <code>external-controller: 0.0.0.0:9090</code> со сгенерированным secret (без него API недоступен).</p>
+🖥️ Web UI эмитит <code>external-controller: 0.0.0.0:9090</code> со сгенерированным secret (без него API недоступен).
+🔌 Mixed Port — комбинированный HTTP+SOCKS5 слушатель; при выключении переключателя слушателя в YAML нет; порт 9090 при включённом Web UI отклоняется (конфликт слушателей).</p>
 
 <button type="button" id="gen">Создать YAML</button>
 <button type="button" id="dl" disabled>Скачать YAML</button>
@@ -85,6 +87,9 @@ $('tun').addEventListener('change', () => {
   $('mips').disabled = !on;
   $('mipsNote').classList.toggle('hidden', !on);
 });
+$('mixedOn').addEventListener('change', () => {
+  $('mixedPort').disabled = !$('mixedOn').checked;
+});
 
 let lastYaml = '';
 $('gen').addEventListener('click', () => {
@@ -96,7 +101,8 @@ $('gen').addEventListener('click', () => {
       subscriptions: $('subsToggle').checked,
       wgFiles: files,
       allowLan: $('allowLan').checked,
-      mixedPort: $('mixedPort').value === '' ? 7890 : Number($('mixedPort').value),
+      mixedOn: $('mixedOn').checked,
+      mixedPort: $('mixedOn').checked ? ($('mixedPort').value === '' ? 7890 : Number($('mixedPort').value)) : null,
       webUI: $('webUI').checked,
       tun: $('tun').checked,
       mipsStack: $('mips').checked,
@@ -107,6 +113,7 @@ $('gen').addEventListener('click', () => {
     const rep = r.report;
     const parts = [];
     parts.push(`✅ узлов: ${rep.nodes}, провайдеров: ${rep.subscriptions.providers.length || 0}`);
+    if (!rep.settings.mixedEnabled) parts.push('🔌 Mixed Port выключен — HTTP/SOCKS-слушателя в YAML нет');
     if (rep.links.accepted) parts.push(`ссылок принято: ${rep.links.accepted}`);
     if (rep.links.rejected) parts.push(`<span class="err">строк отклонено: ${rep.links.rejected}</span>`);
     if (rep.wg.accepted) parts.push(`WG/AWG принято: ${rep.wg.accepted}`);

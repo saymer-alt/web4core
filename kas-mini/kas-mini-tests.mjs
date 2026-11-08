@@ -150,9 +150,27 @@ test('mixed-port rewrite is verified and validated', () => {
     assert.throws(() => build({ mixedPort: 'abc' }), /недопустимый порт/);
 });
 
-test('conflicting port produces visible warning (not refusal)', () => {
-    const r = build({ mixedPort: 9090 });
+test('port 9090 with Web UI ON → hard refusal (overlapping listeners), not warning', () => {
+    assert.throws(() => build({ mixedPort: 9090 }), /9090/);
+    assert.throws(() => build({ mixedPort: 9090 }), /Web UI/);
+    // same port acceptable when Web UI is off (controller not bound) → visible warning only
+    const r = build({ mixedPort: 9090, webUI: false });
+    mustInclude(r.yaml, 'mixed-port: 9090');
+    mustNotInclude(r.yaml, 'external-controller');
     assert.ok(r.report.warnings.some(w => w.includes('9090')), 'warning about busy port expected');
+});
+
+test('mixedOn=false emits no mixed listener; other settings unaffected (checkbox wired to YAML)', () => {
+    const { yaml, report } = build({ mixedOn: false });
+    mustNotInclude(yaml, 'mixed-port');
+    mustInclude(yaml, 'allow-lan: true');
+    mustInclude(yaml, "bind-address: '*'");
+    mustInclude(yaml, 'external-controller: 0.0.0.0:9090'); // web UI independent of mixed listener
+    mustInclude(yaml, 'stack: mips');
+    assert.equal(report.settings.mixedEnabled, false);
+    assert.equal(report.settings.mixedPort, null);
+    // key absent → owner default ON still applies
+    mustInclude(build({}).yaml, 'mixed-port: 7890');
 });
 
 test('tun=false omits tun section; mips toggle is subordinate', () => {
@@ -228,6 +246,45 @@ test('toggle ON with no URLs → plain proxies path still works', () => {
 
 test('non-http(s) subscription line is refused', () => {
     assert.throws(() => build({ subscriptionUrlsText: 'ftp://x/y', subscriptions: true }), /http\(s\)/);
+});
+
+test('malformed subscription URLs rejected by real URL parsing (owner review finding 4)', () => {
+    const cases = [
+        ['https://', /корректн/],                                   // bare scheme
+        ['https:///path', /корректн|хост/],                          // no host
+        ['https://provi der.example/sub', /пробел/],                 // internal whitespace
+        ['https://provider.example/sub\t?x=1', /пробел/],            // tab
+        ['https://user:pass@provider.example/sub', /логином|userinfo/], // userinfo secrets
+        ['not a url at all here', /URL/],                            // not a URL
+    ];
+    for (const [input, re] of cases) {
+        assert.throws(
+            () => build({ linksText: VLESS, subscriptionUrlsText: input, subscriptions: true }),
+            re,
+            `expected refusal for: ${input}`,
+        );
+    }
+});
+
+test('subscription error echo is redacted; trimmed valid URL accepted; empty lines ignored', () => {
+    // no userinfo secret / host must leak into the thrown build error
+    let msg = '';
+    try {
+        build({ linksText: VLESS, subscriptionUrlsText: 'https://token123@provider.example/sub', subscriptions: true });
+    } catch (e) {
+        msg = String(e.message);
+    }
+    assert.match(msg, /некорректные URL-подписки/);
+    assert.ok(!msg.includes('token123'), 'userinfo must not leak into error');
+    assert.ok(!msg.includes('provider.example'), 'host must not leak into error');
+    assert.ok(msg.includes('https://…'), 'redacted scheme-only echo expected');
+    // trimmed + blank lines
+    const r = build({
+        linksText: VLESS,
+        subscriptionUrlsText: '  https://provider.example/sub-a  \n\nhttps://provider.example/sub-b',
+        subscriptions: true,
+    });
+    assert.equal(r.report.subscriptions.urls, 2);
 });
 
 // ---------- 7. WG/AWG ----------

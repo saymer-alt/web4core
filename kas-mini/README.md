@@ -27,7 +27,7 @@ node --test kas-mini/kas-mini-tests.mjs
 | Переключатель | Дефолт | Семантика |
 | --- | --- | --- |
 | 🌐 Allow LAN | ON | `allow-lan: true` + `bind-address: '*'` (все интерфейсы; WAN ограничивает firewall роутера) |
-| 🔌 Mixed Port | ON, 7890 | комбинированный HTTP+SOCKS5 `mixed-port`, целое 1–65535, без дублирующих слушателей |
+| 🔌 Mixed Port | ON, 7890 | комбинированный HTTP+SOCKS5 `mixed-port`, целое 1–65535; выключение переключателя убирает слушатель из YAML; порт 9090 при включённом Web UI → отказ (конфликт слушателей), остальные «занятые» порты → warning |
 | 🖥️ Web UI | ON | `external-controller: 0.0.0.0:9090` + MetaCubeXD preset + **сгенерированный secret** (небезопасный шаблонный блок web4core с пустым secret не используется) |
 | 📡 URL-подписки | OFF | при включении URL становятся нативными `proxy-providers` + `proxy-groups.use`; без fetch в браузере; URL при выключенном тумблере — явная ошибка-подсказка |
 | 🛡️ TUN | ON | `tun` c `auto-route: false`, без авто-маршрутов/DNS hijack/NAT |
@@ -47,6 +47,12 @@ node --test kas-mini/kas-mini-tests.mjs
 
 - WG/AWG `.conf` с `DNS =` отклоняется: парсер DNS читает, но builder его в wireguard-proxy не эмитит
   (проверено и на main, и на ветке link-generators). Отказ вместо молчаливой потери параметра.
+  Кнопка помечена «экспериментально, ограниченная поддержка».
+- **Post-POC решение (требуется owner GO, вне этого PR):** доказанное представление WG DNS в Mihomo-конфиге,
+  либо явный информированный opt-in на пропуск file-local DNS, — с тестами `mihomo -t`. Без silent-drop и
+  без правок общих парсеров в Phase 0.
+- URL-подписки валидируются строгим разбором URL (http/https, обязательный хост, без userinfo-секретов,
+  без пробелов/табов внутри); некорректные строки отклоняются с redact-эхом, не попадают в провайдеры.
 - `mihomo -t` в этой среде недоступен → структурная валидность YAML проверена оффлайн-тестами,
   но поле **NOT_TESTED** для реального Mihomo-парсера.
 - Тестированное подмножество форматов: VLESS Reality (TCP), Hysteria2 (obfs), Trojan (WS), WG/AWG single+multi-peer.

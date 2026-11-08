@@ -174,8 +174,35 @@ function parseSubscriptionUrls(subText, subEnabled) {
     for (const rawLine of lines) {
         const line = rawLine.trim();
         if (!line) continue;
-        if (!/^https?:\/\//i.test(line)) {
-            errors.push({ line: redactLine(line), message: 'подписка должна быть http(s) URL' });
+        // Strict validation (owner review #5817606715, finding 4): real URL parsing,
+        // not a scheme prefix check. Errors are redacted (scheme-only echo).
+        if (/\s/.test(line)) {
+            errors.push({ line: redactLine(line), message: 'URL не должен содержать пробелов или переводов строк' });
+            continue;
+        }
+        // WHATWG normalizes "scheme:///path" to host=<first path segment>, while Go (mihomo)
+        // parses it as an empty host — reject before the URL constructor to match mihomo semantics.
+        if (/^[a-z][a-z0-9+.-]*:\/\/\/+/i.test(line)) {
+            errors.push({ line: redactLine(line), message: 'в URL отсутствует хост' });
+            continue;
+        }
+        let parsed;
+        try {
+            parsed = new URL(line);
+        } catch (e) {
+            errors.push({ line: redactLine(line), message: 'не является корректным URL' });
+            continue;
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            errors.push({ line: redactLine(line), message: `подписка должна быть http(s) URL (получено ${parsed.protocol.replace(':', '')})` });
+            continue;
+        }
+        if (parsed.username || parsed.password) {
+            errors.push({ line: redactLine(line), message: 'URL с логином/паролем (userinfo) не поддерживаются — секреты в URL не допускаются' });
+            continue;
+        }
+        if (!parsed.hostname) {
+            errors.push({ line: redactLine(line), message: 'в URL отсутствует хост' });
             continue;
         }
         urls.push(line);
@@ -219,18 +246,31 @@ function validatePort(port) {
     return n;
 }
 
+const PORT_COLLISION_ERROR = 'порт 9090 занят Web UI (external-controller: 0.0.0.0:9090) — выберите другой Mixed Port или выключите Web UI';
+
 function applyMiniSettings(yaml, settings, warnings) {
     const mixedPort = settings.mixedPort;
+    if (mixedPort !== null && mixedPort !== undefined && mixedPort === 9090 && settings.webUI === true) {
+        throw new Error(PORT_COLLISION_ERROR);
+    }
     let out = yaml;
 
-    const mixedAnchor = /^mixed-port: 7890$/m;
-    if (!mixedAnchor.test(out)) throw new Error('internal: template anchor mixed-port:7890 not found');
-    out = out.replace(mixedAnchor, `mixed-port: ${mixedPort}`);
-    if (!new RegExp(`^mixed-port: ${mixedPort}$`, 'm').test(out)) {
-        throw new Error('internal: mixed-port replacement failed');
-    }
-    if (WARN_PORTS.has(mixedPort)) {
-        warnings.push(`порт ${mixedPort} часто занят другими сервисами роутера (проверьте, что он свободен)`);
+    if (mixedPort === null || mixedPort === undefined) {
+        // Mixed Port toggle OFF → no HTTP/SOCKS listener at all (anchor-verified removal).
+        const mixedAnchor = /^mixed-port: 7890\r?\n/m;
+        if (!mixedAnchor.test(out)) throw new Error('internal: template anchor mixed-port:7890 not found');
+        out = out.replace(mixedAnchor, '');
+        if (/^mixed-port:/m.test(out)) throw new Error('internal: mixed-port removal failed');
+    } else {
+        const mixedAnchor = /^mixed-port: 7890$/m;
+        if (!mixedAnchor.test(out)) throw new Error('internal: template anchor mixed-port:7890 not found');
+        out = out.replace(mixedAnchor, `mixed-port: ${mixedPort}`);
+        if (!new RegExp(`^mixed-port: ${mixedPort}$`, 'm').test(out)) {
+            throw new Error('internal: mixed-port replacement failed');
+        }
+        if (WARN_PORTS.has(mixedPort)) {
+            warnings.push(`порт ${mixedPort} часто занят другими сервисами роутера (проверьте, что он свободен)`);
+        }
     }
 
     if (settings.allowLan === true) {
@@ -264,9 +304,12 @@ function buildMiniMihomoConfig(settings) {
     const s = settings && typeof settings === 'object' ? settings : {};
     const warnings = [];
 
-    const mixedPort = validatePort(s.mixedPort === undefined ? 7890 : s.mixedPort);
+    const mixedOn = s.mixedOn !== false; // owner default ON (toggle wired in index.html)
+    const mixedPort = mixedOn ? validatePort(s.mixedPort === undefined ? 7890 : s.mixedPort) : null;
     const allowLan = s.allowLan === true;
     const webUI = s.webUI === true;
+    // Hard refusal for overlapping listeners (owner review #5817606715, finding 2).
+    if (mixedOn && webUI && mixedPort === 9090) throw new Error(PORT_COLLISION_ERROR);
     let webUISecret = '';
     if (webUI) {
         webUISecret = /^[0-9a-f]{32,128}$/.test(String(s.webUISecret || '')) ? String(s.webUISecret) : generateSecretHex32();
@@ -281,7 +324,9 @@ function buildMiniMihomoConfig(settings) {
         throw new Error('введены URL-подписки, но переключатель «Использовать URL-подписки» выключен — включите его, чтобы URL стали нативными proxy-providers');
     }
     if (sub.errors.length) {
-        throw new Error('некорректные URL-подписки: ' + sub.errors[0].message);
+        const e0 = sub.errors[0]; // line echo is redacted (scheme-only)
+        const more = sub.errors.length > 1 ? ` (+ещё ${sub.errors.length - 1})` : '';
+        throw new Error(`некорректные URL-подписки${more} — «${e0.line}»: ${e0.message}`);
     }
 
     const links = parseLinksLineByLine(s.linksText || '');
@@ -366,6 +411,7 @@ function buildMiniMihomoConfig(settings) {
             },
             settings: {
                 allowLan,
+                mixedEnabled: mixedOn,
                 mixedPort,
                 webUI: { enabled: webUI, generatedSecret: webUI },
                 tun: { enabled: tun, stack: tunStack },
