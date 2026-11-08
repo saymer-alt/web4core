@@ -6,7 +6,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { buildMiniMihomoConfig, vetWireGuardConf, redactLine } from './entry-kas-mini.js';
+import { buildMiniMihomoConfig, vetWireGuardConf, redactLine, createMiniUiState } from './entry-kas-mini.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -421,6 +421,67 @@ test('generation performs no network calls (fetch monkeypatched to throw)', () =
 });
 
 // ---------- 10. bundle footprint & static checks ----------
+// ---------- 11. UI-state: stale generated YAML is never downloadable (owner round-2 review) ----------
+test('ui-state lifecycle: Generate → Edit → Download blocked → Regenerate → Download allowed', () => {
+    const ui = createMiniUiState();
+    // initial: nothing generated yet — no download
+    assert.ok(ui.stale);
+    assert.ok(!ui.canDownload());
+    // Generate
+    ui.onGenerated('yaml-v1');
+    assert.equal(ui.canDownload(), true);
+    assert.equal(ui.yaml, 'yaml-v1');
+    // Edit of any YAML-affecting input → invalidate
+    ui.invalidate();
+    assert.ok(ui.stale);
+    assert.ok(!ui.canDownload(), 'download must be blocked after edit');
+    assert.equal(ui.yaml, '', 'stale YAML must be discarded, not kept for download');
+    // Regenerate → allowed again, new content
+    ui.onGenerated('yaml-v2');
+    assert.equal(ui.canDownload(), true);
+    assert.equal(ui.yaml, 'yaml-v2');
+    assert.notEqual(ui.yaml, 'yaml-v1');
+});
+
+test('ui-state: generation error discards previous YAML (no stale artifact left)', () => {
+    const ui = createMiniUiState();
+    ui.onGenerated('yaml-v1');
+    ui.onGenerateError();
+    assert.ok(ui.stale);
+    assert.ok(!ui.canDownload());
+    assert.equal(ui.yaml, '');
+    // failed attempt is still stale → further edits change nothing until next Generate
+    ui.invalidate();
+    assert.ok(!ui.canDownload());
+    ui.onGenerated('yaml-v2');
+    assert.equal(ui.canDownload(), true);
+});
+
+test('ui-state: invalidate is idempotent; empty YAML never passes canDownload', () => {
+    const ui = createMiniUiState();
+    ui.invalidate();
+    ui.invalidate();
+    assert.ok(ui.stale);
+    assert.ok(!ui.canDownload());
+    ui.onGenerated(''); // defensive: empty yaml never becomes downloadable
+    assert.ok(!ui.canDownload());
+});
+
+test('index.html wires invalidateGeneratedYaml to every YAML-affecting input (static check)', () => {
+    const html = readFileSync(path.join(here, 'index.html'), 'utf8');
+    // two centralized wiring lines: textareas/number port (input) and toggles (change)
+    assert.match(html, /for \(const id of \['links', 'subUrls', 'mixedPort'\]\) \$\(id\)\.addEventListener\('input', invalidateGeneratedYaml\);/);
+    assert.match(html, /for \(const id of \['subsToggle', 'allowLan', 'mixedOn', 'webUI', 'tun', 'mips'\]\) \$\(id\)\.addEventListener\('change', invalidateGeneratedYaml\);/);
+    // WG file selection invalidates too
+    assert.match(html, /renderWg\(\);\s*\n\s*invalidateGeneratedYaml\(\);/);
+    // generation success/error and download guard go through the central state machine
+    assert.match(html, /ui\.onGenerated\(r\.yaml\);/);
+    assert.match(html, /ui\.onGenerateError\(\);/);
+    assert.match(html, /if \(!ui\.canDownload\(\)\) return;/);
+    // no legacy unsynchronized yaml cache remains
+    assert.ok(!html.includes('lastYaml'), 'lastYaml cache must be gone');
+});
+
 test('bundle: exactly 2 files, minified+gzip measured, no CORS fallback / no fetch code / no storage', () => {
     const dist = path.join(here, 'dist');
     assert.ok(existsSync(dist), 'run: node kas-mini/build-mini.mjs first');

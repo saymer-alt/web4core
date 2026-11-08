@@ -422,11 +422,29 @@ function buildMiniMihomoConfig(settings) {
     };
 }
 
+// Central generated-output state (owner round-2 review #5817699546): a generated YAML is
+// either FRESH (downloadable) or ABSENT — any later edit of YAML-affecting inputs discards
+// it, so a stale config can never be downloaded. Pure state, no DOM, unit-testable;
+// index.html wires input/change events of every config input to invalidate().
+function createMiniUiState() {
+    let yaml = '';
+    let stale = true; // true → download blocked, configuration must be regenerated
+    return {
+        get yaml() { return yaml; },
+        get stale() { return stale; },
+        canDownload() { return !stale && yaml.length > 0; },
+        onGenerated(nextYaml) { yaml = String(nextYaml || ''); stale = false; },
+        onGenerateError() { yaml = ''; stale = true; }, // previous YAML must not survive a failed attempt
+        invalidate() { yaml = ''; stale = true; },
+    };
+}
+
 export {
     buildMiniMihomoConfig,
     applyMiniSettings,
     vetWireGuardConf,
     redactLine,
+    createMiniUiState,
     MINI_NOTES,
     AWG_KEYS,
     WG_REFUSED,

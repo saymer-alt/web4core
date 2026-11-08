@@ -54,7 +54,8 @@
 Fallback gvisor — только явным отключением этого переключателя.</p>
 <p class="note">🌐 bind-address «*» — все интерфейсы роутера; доступ извне ограничивается firewall (не меняется автоматически).
 🖥️ Web UI эмитит <code>external-controller: 0.0.0.0:9090</code> со сгенерированным secret (без него API недоступен).
-🔌 Mixed Port — комбинированный HTTP+SOCKS5 слушатель; при выключении переключателя слушателя в YAML нет; порт 9090 при включённом Web UI отклоняется (конфликт слушателей).</p>
+🔌 Mixed Port — комбинированный HTTP+SOCKS5 слушатель; при выключении переключателя слушателя в YAML нет; порт 9090 при включённом Web UI отклоняется (конфликт слушателей).
+♻️ После изменения любых входных данных (ссылки, подписки, настройки, WG-файлы) созданный YAML удаляется, скачивание блокируется до следующего «Создать YAML» — устаревший конфиг скачать нельзя.</p>
 
 <button type="button" id="gen">Создать YAML</button>
 <button type="button" id="dl" disabled>Скачать YAML</button>
@@ -64,16 +65,34 @@ Fallback gvisor — только явным отключением этого п
 <textarea id="preview" readonly spellcheck="false"></textarea>
 
 <script type="module">
-import { buildMiniMihomoConfig } from './kas-mini.js';
+import { buildMiniMihomoConfig, createMiniUiState } from './kas-mini.js';
 
 const $ = id => document.getElementById(id);
 const files = []; // {name, text} — только в памяти вкладки
+
+// Центральная инвалидация результата (owner round-2 review #5817699546): любое изменение
+// входных данных делает сгенерированный YAML недействительным — предпросмотр очищается,
+// скачивание блокируется до следующего «Создать YAML». Старый конфиг недоступен и при
+// ошибке генерации. Состояние — чистая машина createMiniUiState (покрыта юнит-тестами).
+const ui = createMiniUiState();
+const STALE_NOTE = '⚠️ Входные данные изменились — созданный YAML удалён, скачивание заблокировано. Нажмите «Создать YAML», чтобы получить актуальный конфиг.';
+function invalidateGeneratedYaml() {
+  if (ui.stale) return; // нечего инвалидировать — не затираем другие сообщения
+  ui.invalidate();
+  $('preview').value = '';
+  $('dl').disabled = true;
+  $('report').innerHTML = `<p class="warn">${STALE_NOTE}</p>`;
+}
+// Ссылки, подписки и порт — посимвольный ввод; переключатели и WG-файлы — change.
+for (const id of ['links', 'subUrls', 'mixedPort']) $(id).addEventListener('input', invalidateGeneratedYaml);
+for (const id of ['subsToggle', 'allowLan', 'mixedOn', 'webUI', 'tun', 'mips']) $(id).addEventListener('change', invalidateGeneratedYaml);
 
 $('wgBtn').addEventListener('click', () => $('wgFiles').click());
 $('wgFiles').addEventListener('change', async (ev) => {
   for (const f of ev.target.files) files.push({ name: f.name, text: await f.text() });
   ev.target.value = '';
   renderWg();
+  invalidateGeneratedYaml();
 });
 function renderWg() {
   $('wgCount').textContent = files.length ? `файлов: ${files.length}` : '';
@@ -91,7 +110,6 @@ $('mixedOn').addEventListener('change', () => {
   $('mixedPort').disabled = !$('mixedOn').checked;
 });
 
-let lastYaml = '';
 $('gen').addEventListener('click', () => {
   $('report').innerHTML = '';
   try {
@@ -107,7 +125,7 @@ $('gen').addEventListener('click', () => {
       tun: $('tun').checked,
       mipsStack: $('mips').checked,
     });
-    lastYaml = r.yaml;
+    ui.onGenerated(r.yaml);
     $('preview').value = r.yaml;
     $('dl').disabled = false;
     const rep = r.report;
@@ -130,14 +148,15 @@ $('gen').addEventListener('click', () => {
     if (rep.settings.webUI.enabled) ul.push('<li>secret контроллера сгенерирован и включён в YAML (строка <code>secret:</code> в предпросмотре)</li>');
     $('report').insertAdjacentHTML('beforeend', '<ul>' + ul.join('') + '</ul>');
   } catch (e) {
+    ui.onGenerateError(); // старый YAML не переживает неудачную генерацию
     $('preview').value = '';
     $('dl').disabled = true;
     $('report').innerHTML = `<p class="err">❌ ${escapeHtml(String(e && e.message || e))}</p>`;
   }
 });
 $('dl').addEventListener('click', () => {
-  if (!lastYaml) return;
-  const blob = new Blob([lastYaml], { type: 'text/yaml' });
+  if (!ui.canDownload()) return;
+  const blob = new Blob([ui.yaml], { type: 'text/yaml' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = 'config.yaml';
