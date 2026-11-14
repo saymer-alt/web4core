@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KAS Mini Mihomo Generator (Phase 0)</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 14px/1.45 system-ui, sans-serif; max-width: 860px; margin: 0 auto; padding: 12px; }
+  h1 { font-size: 18px; } h2 { font-size: 15px; margin: 18px 0 6px; }
+  textarea { width: 100%; box-sizing: border-box; min-height: 110px; font-family: ui-monospace, monospace; }
+  textarea#preview { min-height: 260px; }
+  label.opt { display: inline-flex; gap: 6px; align-items: center; margin: 4px 14px 4px 0; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 10px 0; }
+  button { padding: 6px 14px; margin: 6px 6px 0 0; }
+  #report, #yamlout { margin-top: 10px; }
+  .err { color: #c0392b; } .warn { color: #b8860b; } .note { color: #666; font-size: 12px; }
+  .hidden { display: none; }
+  #subwrap.off { opacity: .5; }
+</style>
+</head>
+<body>
+<h1>KAS Mini Mihomo Generator</h1>
+<p class="note">Эксперимент Phase 0 (issue #425): только локальная генерация нового полного <code>config.yaml</code>.
+Импорт через существующий импортёр KAS Web (проверка/backup/rollback) выполняется отдельным явным действием.
+Ниже нет сетевых запросов и хранения данных: всё живёт в памяти вкладки до закрытия.</p>
+
+<h2>Входные данные</h2>
+<label>Ссылки на серверы (по одной в строке: <code>vless://</code>, <code>hysteria2://</code>, <code>trojan://</code>, …)</label>
+<textarea id="links" placeholder="vless://…&#10;hysteria2://…&#10;trojan://…" spellcheck="false"></textarea>
+
+<label class="opt"><input type="checkbox" id="subsToggle"> 📡 Использовать URL-подписки (нативные proxy-providers, загрузит сам Mihomo после импорта)</label>
+<div id="subwrap" class="off">
+  <label>URL-подписки (http(s), по одной в строке)</label>
+  <textarea id="subUrls" placeholder="https://example.com/sub" spellcheck="false"></textarea>
+</div>
+
+<label class="opt"><button type="button" id="wgBtn">📂 Добавить WireGuard / AmneziaWG (.conf, .wg, .awg)</button>
+<span id="wgCount" class="note"></span></label>
+<input type="file" id="wgFiles" multiple accept=".conf,.wg,.awg" class="hidden">
+<div id="wgList" class="note"></div>
+<div class="note">⚠️ Экспериментально, ограниченная поддержка: conf с <code>DNS =</code> или неизвестными полями отклоняется целиком (без молчаливой потери параметров). Полная поддержка WG DNS — отдельное решение после Phase 0.</div>
+
+<h2>Настройки</h2>
+<fieldset>
+  <label class="opt"><input type="checkbox" id="allowLan" checked> 🌐 Allow LAN (0.0.0.0)</label>
+  <label class="opt"><input type="checkbox" id="mixedOn" checked> 🔌 Mixed Port</label>
+  <input type="number" id="mixedPort" min="1" max="65535" value="7890" style="width:90px">
+  <label class="opt"><input type="checkbox" id="webUI" checked> 🖥️ Web UI (MetaCubeXD, secret обязателен)</label>
+  <label class="opt"><input type="checkbox" id="tun" checked> 🛡️ TUN Interface</label>
+  <label class="opt"><input type="checkbox" id="mips" checked> ⚡ MIPS stack для TUN</label>
+</fieldset>
+<p class="note" id="mipsNote">⚡ MIPS stack требует Mihomo ≥ 1.19.31. MIPS — это имя TUN-стека Mihomo, а не архитектура CPU роутера.
+Fallback gvisor — только явным отключением этого переключателя.</p>
+<p class="note">🌐 bind-address «*» — все интерфейсы роутера; доступ извне ограничивается firewall (не меняется автоматически).
+🖥️ Web UI эмитит <code>external-controller: 0.0.0.0:9090</code> со сгенерированным secret (без него API недоступен).
+🔌 Mixed Port — комбинированный HTTP+SOCKS5 слушатель; при выключении переключателя слушателя в YAML нет; порт 9090 при включённом Web UI отклоняется (конфликт слушателей).
+♻️ После изменения любых входных данных (ссылки, подписки, настройки, WG-файлы) созданный YAML удаляется, скачивание блокируется до следующего «Создать YAML» — устаревший конфиг скачать нельзя.
+Выбор WG/AWG-файлов инвалидирует результат немедленно (до завершения чтения), на время чтения «Создать YAML» заблокирована; файлы добавляются только при успешном чтении всех выбранных.</p>
+
+<button type="button" id="gen">Создать YAML</button>
+<button type="button" id="dl" disabled>Скачать YAML</button>
+
+<div id="report"></div>
+<h2>Предпросмотр (read-only)</h2>
+<textarea id="preview" readonly spellcheck="false"></textarea>
+
+<script type="module">
+import { buildMiniMihomoConfig, createMiniUiState, readWgFileEntries } from './kas-mini.js';
+
+const $ = id => document.getElementById(id);
+const files = []; // {name, text} — только в памяти вкладки
+
+// Центральная инвалидация результата (owner round-2 review #5817699546): любое изменение
+// входных данных делает сгенерированный YAML недействительным — предпросмотр очищается,
+// скачивание блокируется до следующего «Создать YAML». Старый конфиг недоступен и при
+// ошибке генерации. Состояние — чистая машина createMiniUiState (покрыта юнит-тестами).
+const ui = createMiniUiState();
+const STALE_NOTE = '⚠️ Входные данные изменились — созданный YAML удалён, скачивание заблокировано. Нажмите «Создать YAML», чтобы получить актуальный конфиг.';
+function invalidateGeneratedYaml() {
+  if (ui.stale) return; // нечего инвалидировать — не затираем другие сообщения
+  ui.invalidate();
+  $('preview').value = '';
+  $('dl').disabled = true;
+  $('report').innerHTML = `<p class="warn">${STALE_NOTE}</p>`;
+}
+// Ссылки, подписки и порт — посимвольный ввод; переключатели и WG-файлы — change.
+for (const id of ['links', 'subUrls', 'mixedPort']) $(id).addEventListener('input', invalidateGeneratedYaml);
+for (const id of ['subsToggle', 'allowLan', 'mixedOn', 'webUI', 'tun', 'mips']) $(id).addEventListener('change', invalidateGeneratedYaml);
+
+$('wgBtn').addEventListener('click', () => $('wgFiles').click());
+let readingWg = false; // выбранные файлы ещё читаются → Generate заблокирован (round-3 review #5817777839)
+$('wgFiles').addEventListener('change', async (ev) => {
+  if (readingWg) { // повторный выбор во время чтения отклоняется целиком, без перемешивания
+    ev.target.value = '';
+    $('report').innerHTML = '<p class="warn">⏳ Предыдущее чтение WG/AWG-файлов ещё идёт — выберите файлы после его завершения.</p>';
+    return;
+  }
+  invalidateGeneratedYaml(); // синхронно, ДО первого await — старый YAML исчезает сразу при выборе файлов
+  const picked = Array.from(ev.target.files || []);
+  ev.target.value = '';
+  if (!picked.length) { renderWg(); return; }
+  readingWg = true;
+  $('gen').disabled = true; // генерация по неполным входным данным запрещена, пока файлы не прочитаны
+  $('report').innerHTML = '<p class="note">⏳ Чтение выбранных WG/AWG-файлов…</p>';
+  try {
+    const entries = await readWgFileEntries(picked); // all-or-nothing: частичного «успеха» нет
+    files.push(...entries);
+    renderWg();
+    $('report').innerHTML = `<p class="warn">${STALE_NOTE}</p><p class="note">📂 Файлы прочитаны (всего: ${files.length}) — нажмите «Создать YAML».</p>`;
+  } catch (e) {
+    renderWg(); // files не изменился — упавшие файлы не добавлены
+    $('report').innerHTML = `<p class="err">❌ Не удалось прочитать WG/AWG-файл: ${escapeHtml(String(e && e.message || e))}. Файлы не добавлены — выберите их заново.</p><p class="warn">${STALE_NOTE}</p>`;
+  } finally {
+    readingWg = false;
+    $('gen').disabled = false;
+  }
+});
+function renderWg() {
+  $('wgCount').textContent = files.length ? `файлов: ${files.length}` : '';
+  $('wgList').textContent = files.map(f => f.name).join(', ');
+}
+$('subsToggle').addEventListener('change', () => {
+  $('subwrap').classList.toggle('off', !$('subsToggle').checked);
+});
+$('tun').addEventListener('change', () => {
+  const on = $('tun').checked;
+  $('mips').disabled = !on;
+  $('mipsNote').classList.toggle('hidden', !on);
+});
+$('mixedOn').addEventListener('change', () => {
+  $('mixedPort').disabled = !$('mixedOn').checked;
+});
+
+$('gen').addEventListener('click', () => {
+  if (readingWg) return; // защита от гонки: файлы ещё читаются — входные данные неполны
+  $('report').innerHTML = '';
+  try {
+    const r = buildMiniMihomoConfig({
+      linksText: $('links').value,
+      subscriptionUrlsText: $('subUrls').value,
+      subscriptions: $('subsToggle').checked,
+      wgFiles: files,
+      allowLan: $('allowLan').checked,
+      mixedOn: $('mixedOn').checked,
+      mixedPort: $('mixedOn').checked ? ($('mixedPort').value === '' ? 7890 : Number($('mixedPort').value)) : null,
+      webUI: $('webUI').checked,
+      tun: $('tun').checked,
+      mipsStack: $('mips').checked,
+    });
+    ui.onGenerated(r.yaml);
+    $('preview').value = r.yaml;
+    $('dl').disabled = false;
+    const rep = r.report;
+    const parts = [];
+    parts.push(`✅ узлов: ${rep.nodes}, провайдеров: ${rep.subscriptions.providers.length || 0}`);
+    if (!rep.settings.mixedEnabled) parts.push('🔌 Mixed Port выключен — HTTP/SOCKS-слушателя в YAML нет');
+    if (rep.links.accepted) parts.push(`ссылок принято: ${rep.links.accepted}`);
+    if (rep.links.rejected) parts.push(`<span class="err">строк отклонено: ${rep.links.rejected}</span>`);
+    if (rep.wg.accepted) parts.push(`WG/AWG принято: ${rep.wg.accepted}`);
+    if (rep.wg.refused) parts.push(`<span class="err">WG/AWG отклонено: ${rep.wg.refused}</span>`);
+    $('report').innerHTML = '<p>' + parts.join(' · ') + '</p>';
+    const ul = [];
+    for (const e of rep.links.errors) ul.push(`<li class="err">${escapeHtml(e.line)} — ${escapeHtml(e.message)}</li>`);
+    for (const f of rep.wg.files) {
+      if (f.status !== 'accepted') ul.push(`<li class="err">${escapeHtml(f.name)}: ${escapeHtml(f.error.message)}</li>`);
+      else for (const w of (f.warnings || [])) ul.push(`<li class="warn">${escapeHtml(f.name)}: ${escapeHtml(w.key)} — ${escapeHtml(w.detail)}</li>`);
+    }
+    for (const w of rep.warnings) ul.push(`<li class="warn">${escapeHtml(w)}</li>`);
+    for (const n of rep.notes) ul.push(`<li class="note">${escapeHtml(n)}</li>`);
+    if (rep.settings.webUI.enabled) ul.push('<li>secret контроллера сгенерирован и включён в YAML (строка <code>secret:</code> в предпросмотре)</li>');
+    $('report').insertAdjacentHTML('beforeend', '<ul>' + ul.join('') + '</ul>');
+  } catch (e) {
+    ui.onGenerateError(); // старый YAML не переживает неудачную генерацию
+    $('preview').value = '';
+    $('dl').disabled = true;
+    $('report').innerHTML = `<p class="err">❌ ${escapeHtml(String(e && e.message || e))}</p>`;
+  }
+});
+$('dl').addEventListener('click', () => {
+  if (!ui.canDownload()) return;
+  const blob = new Blob([ui.yaml], { type: 'text/yaml' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'config.yaml';
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+</script>
+</body>
+</html>
